@@ -173,7 +173,7 @@
   document.addEventListener('input', (e) => {
     if (e.target.closest && e.target.closest('.chapter-body, #aux-editor')) requestPaint();
   });
-  const observer = new MutationObserver(() => requestPaint());
+  const observer = new MutationObserver(() => update());
   observer.observe($('#chapters'), {subtree:true,childList:true});
   observer.observe($('#aux-editor'), {subtree:true,childList:true});
   observer.observe($('#editor-view'), {attributes:true,attributeFilter:['hidden']});
