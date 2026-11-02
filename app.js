@@ -8697,6 +8697,8 @@ function switchTab(name) {
   const auxEditor = $('#aux-editor');
   const dList = $('#darlings-list');
   const oList = $('#outline-list');
+  const cList = $('#character-manager');
+  if (cList) cList.hidden = name !== 'characters';
   const back = name === 'notes' && tabPlaces.notes && tabPlaces.notes.page !== notesPage ? { scroll: 0 } : tabPlaces[name];
   const returnTo = () => { if (back && typeof back.scroll === 'number') scroller.scrollTop = back.scroll; };
 
@@ -8723,7 +8725,11 @@ function switchTab(name) {
   for (const id of ['#outline-board', '#outline-views', '#outline-board-hint']) { const el = $(id); if (el) el.hidden = true; }
 
   hideSnapshot();
-  if (name === 'darlings') {
+  if (name === 'characters') {
+    $('#aux-title').textContent = 'Characters';
+    if (window.neoDialogue) window.neoDialogue.renderCharacters();
+    returnTo();
+  } else if (name === 'darlings') {
     $('#aux-title').textContent = t('Darlings');
     dList.hidden = false;
     renderDarlings();
