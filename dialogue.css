@@ -1,0 +1,14 @@
+/* Neo Dialogue character registry and non-editable speaker gutter */
+#character-manager { max-width: 680px; margin: 28px auto; padding: 0 24px 60px; }
+.character-intro { opacity: .68; margin-bottom: 24px; line-height: 1.6; }
+.character-list { display: flex; flex-direction: column; gap: 12px; }
+.character-row, .character-add { display: flex; align-items: center; gap: 12px; }
+.character-row input[type="color"] { width: 36px; height: 36px; padding: 2px; border: 1px solid #8885; border-radius: 6px; background: transparent; cursor: pointer; }
+.character-row input[type="text"], .character-add input { min-width: 0; flex: 1; padding: 8px 10px; border: 1px solid #8885; background: transparent; color: inherit; border-radius: 5px; font: inherit; }
+.character-row button, .character-add button { padding: 8px 12px; border: 1px solid #8885; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
+.character-row button:hover, .character-add button:hover { background: #8882; }
+.character-add { margin-top: 22px; }
+#paper-scroll { position: relative; }
+#speaker-gutter { position: absolute; top: 0; left: 0; width: 100%; height: 0; pointer-events: none; z-index: 6; }
+.speaker-selector { position: absolute; width: 108px; max-width: 108px; padding: 3px 6px; border-radius: 4px; border: 1px solid transparent; border-left: 3px solid var(--speaker-color); background: transparent; color: inherit; font: 11px/1.35 sans-serif; opacity: .36; cursor: pointer; pointer-events: auto; }
+.speaker-selector:hover, .speaker-selector:focus { opacity: 1; border-color: #8885; background: var(--paper-bg, Canvas); }
