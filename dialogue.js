@@ -7,6 +7,8 @@
   const palette = ['#D87B9F','#69A6D8','#8A9A88','#D6A456','#A18DD5','#D27D65'];
   let showingBook = null;
   let paintPending = false;
+  const descriptionsOpen = new Set();
+  let activeMenu = null;
   const gutter = document.createElement('div');
   gutter.id = 'speaker-gutter';
   gutter.setAttribute('aria-label', 'Paragraph speakers');
@@ -32,6 +34,8 @@
     const list = document.createElement('div');
     list.className = 'character-list';
     for (const character of characters()) {
+      const entry = document.createElement('div');
+      entry.className = 'character-entry';
       const row = document.createElement('div');
       row.className = 'character-row';
       const colour = document.createElement('input');
@@ -54,18 +58,50 @@
         character.name = next;
         changed();
       });
+      const details = document.createElement('button');
+      details.type = 'button';
+      details.className = 'character-details-toggle';
+      const descriptionId = 'character-description-' + character.id;
+      const expanded = descriptionsOpen.has(character.id);
+      details.setAttribute('aria-controls', descriptionId);
+      details.setAttribute('aria-expanded', String(expanded));
+      details.textContent = expanded ? 'Hide' : 'Description';
+      const description = document.createElement('textarea');
+      description.id = descriptionId;
+      description.className = 'character-description';
+      description.rows = 4;
+      description.placeholder = 'Character description (optional)';
+      description.setAttribute('aria-label', 'Description for ' + character.name);
+      description.value = character.description || '';
+      description.hidden = !expanded;
+      description.addEventListener('input', () => {
+        character.description = description.value;
+        scheduleMetaSave();
+      });
+      details.addEventListener('click', () => {
+        const open = !descriptionsOpen.has(character.id);
+        if (open) descriptionsOpen.add(character.id);
+        else descriptionsOpen.delete(character.id);
+        description.hidden = !open;
+        details.setAttribute('aria-expanded', String(open));
+        details.textContent = open ? 'Hide' : 'Description';
+        if (open) description.focus();
+      });
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.textContent = 'Remove';
       remove.setAttribute('aria-label', 'Remove ' + character.name);
       remove.addEventListener('click', () => {
+        if (!window.confirm('Remove character "' + character.name + '"? Existing speaker assignments will appear unassigned.')) return;
+        descriptionsOpen.delete(character.id);
         // Keep the former reference on paragraphs: they become unassigned in
         // the UI without accidentally attributing them to another character.
         book.characters = characters().filter((c) => c.id !== character.id);
         changed();
       });
-      row.append(colour,name,remove);
-      list.append(row);
+      row.append(colour,name,details,remove);
+      entry.append(row,description);
+      list.append(entry);
     }
     panel.append(list);
     const add = document.createElement('form');
@@ -98,57 +134,93 @@
     return [];
   }
   function visibleParagraphs() {
-    const scroll = $('#paper-scroll').getBoundingClientRect();
+    const viewport = $('#paper-scroll').getBoundingClientRect();
     const out = [];
     for (const body of activeBodies()) {
-      for (const p of body.children) {
-        if (p.tagName !== 'P' || p.classList.contains('ghost') || p.classList.contains('scene-break')) continue;
+      // Notes may start as bare text or DIVs instead of paragraphs.
+      const blocks = [...body.children].filter(el => el.matches('p, div') && !el.classList.contains('ghost') && !el.classList.contains('scene-break'));
+      if (!blocks.length && body === $('#aux-editor')) {
+        // The empty notes page must still offer a first-line speaker control.
+        const p = document.createElement('p');
+        p.append(document.createElement('br'));
+        body.append(p);
+        blocks.push(p);
+      }
+      for (const p of blocks) {
         const r = p.getBoundingClientRect();
-        if (r.bottom >= scroll.top && r.top <= scroll.bottom) out.push({p,r});
+        if (r.bottom >= viewport.top && r.top <= viewport.bottom) out.push({p,r});
       }
     }
     return out;
   }
+  function closeMenu() {
+    if (!activeMenu) return;
+    activeMenu.remove();
+    activeMenu = null;
+  }
+  function chooseSpeaker(p, value) {
+    if (value) p.dataset.speakerId = value;
+    else delete p.dataset.speakerId;
+    if (currentTab === 'notes') {
+      auxDirty = true;
+      scheduleAuxSave();
+    } else {
+      const body = p.closest('.chapter-body');
+      const chapter = body && body.closest('.chapter');
+      if (chapter) syncChapter(body,chapter.dataset.id);
+    }
+    closeMenu();
+    requestPaint();
+  }
+  function openMenu(button,p) {
+    closeMenu();
+    const menu = document.createElement('div');
+    menu.className = 'speaker-menu';
+    menu.setAttribute('role','listbox');
+    menu.setAttribute('aria-label','Select speaker');
+    for (const character of [{id:'',name:'— No speaker',color:''},...characters()]) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'speaker-menu-option';
+      option.setAttribute('role','option');
+      option.setAttribute('aria-selected',String((p.dataset.speakerId || '') === character.id));
+      option.textContent = character.name;
+      if (character.id) option.style.setProperty('--speaker-color', character.color);
+      option.addEventListener('click',() => chooseSpeaker(p,character.id));
+      menu.append(option);
+    }
+    document.body.append(menu);
+    activeMenu = menu;
+    const r = button.getBoundingClientRect();
+    const menuHeight = menu.getBoundingClientRect().height;
+    const top = Math.min(Math.max(4,r.bottom + 3), Math.max(4,window.innerHeight - menuHeight - 4));
+    menu.style.top = top + 'px';
+    menu.style.left = Math.max(4,Math.min(r.left,window.innerWidth - menu.offsetWidth - 4)) + 'px';
+    const first = menu.querySelector('[aria-selected="true"]') || menu.firstElementChild;
+    if (first) first.focus();
+  }
   function paint() {
     paintPending = false;
+    closeMenu();
     gutter.replaceChildren();
     if (!book || !['notes','manuscript'].includes(currentTab)) return;
     const scroll = $('#paper-scroll');
     const rect = scroll.getBoundingClientRect();
     const cast = characters();
     for (const {p,r} of visibleParagraphs()) {
-      const selector = document.createElement('select');
-      selector.className = 'speaker-selector';
-      selector.setAttribute('aria-label', 'Speaker for paragraph: ' + p.textContent.slice(0,65));
-      const none = document.createElement('option');
-      none.value = '';
-      none.textContent = '—';
-      selector.append(none);
-      for (const character of cast) {
-        const opt = document.createElement('option');
-        opt.value = character.id;
-        opt.textContent = character.name;
-        selector.append(opt);
-      }
       const assigned = p.dataset.speakerId || '';
-      selector.value = cast.some(c => c.id === assigned) ? assigned : '';
-      const selected = cast.find(c => c.id === selector.value);
-      selector.style.setProperty('--speaker-color', selected ? selected.color : 'transparent');
+      const selected = cast.find(c => c.id === assigned);
+      const selector = document.createElement('button');
+      selector.type = 'button';
+      selector.className = 'speaker-selector' + (selected ? ' has-speaker' : '');
+      selector.setAttribute('aria-label','Speaker for paragraph: ' + p.textContent.slice(0,65));
+      selector.setAttribute('aria-haspopup','listbox');
+      selector.textContent = selected ? selected.name : '—';
+      selector.title = selected ? selected.name : 'Select speaker';
+      selector.style.setProperty('--speaker-color',selected ? selected.color : 'transparent');
       selector.style.top = (r.top - rect.top + scroll.scrollTop) + 'px';
       selector.style.left = Math.max(3,r.left - rect.left - 115 + scroll.scrollLeft) + 'px';
-      selector.addEventListener('change', () => {
-        if (selector.value) p.dataset.speakerId = selector.value;
-        else delete p.dataset.speakerId;
-        if (currentTab === 'notes') {
-          auxDirty = true;
-          scheduleAuxSave();
-        } else {
-          const body = p.closest('.chapter-body');
-          const chapter = body && body.closest('.chapter');
-          if (chapter) syncChapter(body,chapter.dataset.id);
-        }
-        requestPaint();
-      });
+      selector.addEventListener('click',() => openMenu(selector,p));
       gutter.append(selector);
     }
   }
@@ -161,10 +233,13 @@
     if (!book || $('#editor-view').hidden) { gutter.replaceChildren(); showingBook = null; return; }
     if (showingBook !== book.id) {
       showingBook = book.id;
+      descriptionsOpen.clear();
       renderCharacters();
     }
     requestPaint();
   }
+  document.addEventListener('pointerdown',(e) => { if (activeMenu && !activeMenu.contains(e.target) && !e.target.closest('.speaker-selector')) closeMenu(); },true);
+  document.addEventListener('keydown',(e) => { if(e.key==='Escape') closeMenu(); },true);
   document.addEventListener('click', (e) => {
     if (e.target.closest && e.target.closest('.tab')) setTimeout(update,0);
   },true);
