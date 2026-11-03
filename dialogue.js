@@ -278,7 +278,146 @@
     return null;
   }
 
-  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop };
+
+  // ---- the game's files ----
+
+  // JSON as the game reads it: // and /* */ comments and trailing commas allowed
+  function parseJsonc(src) {
+    let out = '';
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+      const ch = src[i];
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < n && src[j] !== '"') j += src[j] === '\\' ? 2 : 1;
+        out += src.slice(i, j + 1);
+        i = j + 1;
+      } else if (ch === '/' && src[i + 1] === '/') {
+        while (i < n && src[i] !== '\n') i++;
+      } else if (ch === '/' && src[i + 1] === '*') {
+        const end = src.indexOf('*/', i + 2);
+        i = end < 0 ? n : end + 2;
+      } else {
+        out += ch;
+        i++;
+      }
+    }
+    return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
+  }
+
+  // story.json and one language's text file, read the way the game reads
+  // them; problems go in errors and what can be read is kept
+  function readStory(storyText, textText, textName) {
+    const errors = [];
+    let raw = {};
+    if (storyText) {
+      try { raw = parseJsonc(storyText) || {}; } catch (err) { errors.push('story.json: ' + err.message); }
+    }
+    let text = {};
+    if (textText) {
+      try { text = parseJsonc(textText) || {}; } catch (err) { errors.push((textName || 'text') + ': ' + err.message); }
+    }
+    const strs = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []);
+    const story = {
+      characters: (raw.characters || []).map((c) => ({ id: c.id || '', name: c.name || c.id || '' })),
+      events: (raw.events || []).map((e) => ({ id: e.id || '', description: e.description || '' })),
+      dialogues: (raw.dialogues || []).map((d) => ({
+        id: d.id || '',
+        character: d.character || '',
+        requires: { events: strs(d.requires && d.requires.events), dialogues: strs(d.requires && d.requires.dialogues) },
+        next: strs(d.next)
+      }))
+    };
+    return { story, text, errors };
+  }
+
+  // Who the game has to speak besides the story's own characters, as the
+  // Writer finds them: the minions in quarters.json and commissions.json
+  // (the warhost), the recruits in hr.json. files: { name: text or null }
+  function gameSpeakers(files) {
+    const out = [];
+    const add = (file, list, source) => {
+      if (!files || !files[file]) return;
+      let doc;
+      try { doc = parseJsonc(files[file]); } catch { return; }
+      for (const item of (doc && Array.isArray(doc[list]) ? doc[list] : [])) {
+        if (!item || typeof item.id !== 'string' || out.some((s) => s.id === item.id)) continue;
+        out.push({ id: item.id, name: typeof item.name === 'string' ? item.name : item.id, source });
+      }
+    };
+    add('quarters.json', 'minions', 'minion');
+    add('commissions.json', 'minions', 'minion');
+    add('hr.json', 'candidates', 'recruit');
+    return out;
+  }
+
+  const STORY_HEADER = '{\n' +
+    '  // The story: who speaks besides the minions, the story events (state variables) dialogues can wait for,\n' +
+    '  // and the dialogues. Each dialogue is one line, spoken by "character" (a minion\'s id from quarters.json,\n' +
+    '  // commissions.json or hr.json, or a character below) once every event in "requires.events" has happened\n' +
+    '  // and every dialogue in "requires.dialogues" has been read. "next" are the lines that follow it in the\n' +
+    '  // same conversation. The words are in text/<language>.json under the dialogue\'s id. Edited with the\n' +
+    '  // Writer (tools/Writer), which rewrites this file: comments other than these are not kept.\n';
+  const J = (v) => JSON.stringify(v);
+  const L = (ids) => '[' + ids.map(J).join(', ') + ']';
+  function list(name, items, line) {
+    if (!items.length) return `  "${name}": []`;
+    return `  "${name}": [\n` + items.map((x) => '    ' + line(x)).join(',\n') + '\n  ]';
+  }
+  // data/story.json as the Writer saves it: one entry per line, so changes diff cleanly
+  function storyToJson(story) {
+    return STORY_HEADER +
+      list('characters', story.characters, (c) => `{ "id": ${J(c.id)}, "name": ${J(c.name)} }`) + ',\n\n' +
+      list('events', story.events, (e) => `{ "id": ${J(e.id)}, "description": ${J(e.description)} }`) + ',\n\n' +
+      list('dialogues', story.dialogues, (d) => `{ "id": ${J(d.id)}, "character": ${J(d.character)}, ` +
+        `"requires": { "events": ${L(d.requires.events)}, "dialogues": ${L(d.requires.dialogues)} }, "next": ${L(d.next)} }`) +
+      '\n}\n';
+  }
+  // a language's text file: one line's words per line, in the story's order,
+  // then any text for lines the story doesn't have
+  function textToJson(story, text) {
+    const known = new Set(story.dialogues.map((d) => d.id));
+    const ids = [...story.dialogues.map((d) => d.id).filter((id) => id in text), ...Object.keys(text).filter((id) => !known.has(id)).sort()];
+    if (!ids.length) return '{\n}\n';
+    return '{\n' + ids.map((id) => `  ${J(id)}: ${J(text[id])}`).join(',\n') + '\n}\n';
+  }
+
+  // ---- three sides of the story: what the book last read or wrote (base),
+  // the book now (ours) and the game now (theirs) ----
+  // Every dialogue, character, event and line of text either side changed
+  // since the base is taken from that side; where both changed the same one
+  // differently, the book's is kept and the clash listed.
+  function merge(base, ours, theirs) {
+    const clashes = [];
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const pick = (kind, id, b, o, th) => {
+      if (same(o, th)) return o;
+      if (same(b, o)) return th; // only the game changed it (or removed it)
+      if (same(b, th)) return o; // only the book did
+      clashes.push({ kind, id });
+      return o === undefined ? th : o;
+    };
+    const byId = (list) => new Map((list || []).map((x) => [x.id, x]));
+    const mergeList = (kind, b, o, th) => {
+      const B = byId(b), O = byId(o), T = byId(th);
+      const order = uniq([...(th || []).map((x) => x.id), ...(o || []).map((x) => x.id)]);
+      return order.map((id) => pick(kind, id, B.get(id), O.get(id), T.get(id))).filter(Boolean);
+    };
+    const story = {
+      characters: mergeList('character', base.story.characters, ours.story.characters, theirs.story.characters),
+      events: mergeList('event', base.story.events, ours.story.events, theirs.story.events),
+      dialogues: mergeList('dialogue', base.story.dialogues, ours.story.dialogues, theirs.story.dialogues)
+    };
+    const text = {};
+    for (const id of uniq([...Object.keys(theirs.text || {}), ...Object.keys(ours.text || {})])) {
+      const v = pick('text', id, (base.text || {})[id], (ours.text || {})[id], (theirs.text || {})[id]);
+      if (v !== undefined) text[id] = v;
+    }
+    return { story, text, clashes };
+  }
+
+  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop, parseJsonc, readStory, gameSpeakers, storyToJson, textToJson, merge };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.NeoDialogue = api;
 })(typeof window !== 'undefined' ? window : globalThis);

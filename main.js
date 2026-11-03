@@ -2043,6 +2043,67 @@ ipcMain.handle('import:files', async (_e, paths) => {
 
 // { chapters: true }: files that become chapters of the open book, so
 // no scripts (a script is one chapter of its own kind)
+// ---- dialogue books: the game's story files ----
+// A dialogue book reads and writes a game's story where the Blackest Smith
+// Writer keeps it: <repo>/data/story.json, data/text/<language>.json, and
+// the minions who can speak in data/quarters.json, commissions.json and
+// hr.json. Only those files are touched, nothing else in the folder.
+const STORY_LANG = /^[a-z0-9_-]+$/i;
+const STORY_SPEAKER_FILES = ['quarters.json', 'commissions.json', 'hr.json'];
+function storyFolder(repo) {
+  if (typeof repo !== 'string' || !path.isAbsolute(repo)) throw new Error('not a folder');
+  const data = path.join(repo, 'data');
+  if (!fs.existsSync(data) || !fs.statSync(data).isDirectory()) throw new Error(t('That folder has no data folder for the game’s story.'));
+  return data;
+}
+async function readIfThere(file) {
+  try { return await fs.promises.readFile(file, 'utf8'); } catch (err) { if (err.code === 'ENOENT') return null; throw err; }
+}
+ipcMain.handle('story:pick', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: t('The game’s folder (the one with data/story.json)'),
+    properties: ['openDirectory']
+  });
+  if (canceled || !filePaths.length) return null;
+  try { storyFolder(filePaths[0]); } catch (err) { return { error: String(err.message || err) }; }
+  return { repo: filePaths[0] };
+});
+ipcMain.handle('story:read', async (_e, repo, language) => {
+  try {
+    const data = storyFolder(repo);
+    const lang = STORY_LANG.test(language || '') ? language : 'en';
+    let languages = [];
+    try { languages = (await fs.promises.readdir(path.join(data, 'text'))).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)).sort(); } catch { /* no text yet */ }
+    const speakers = {};
+    for (const f of STORY_SPEAKER_FILES) speakers[f] = await readIfThere(path.join(data, f));
+    return {
+      story: await readIfThere(path.join(data, 'story.json')),
+      text: await readIfThere(path.join(data, 'text', lang + '.json')),
+      language: lang,
+      languages: languages.length ? languages : ['en'],
+      speakers
+    };
+  } catch (err) {
+    logError('story read', err);
+    return { error: String(err.message || err) };
+  }
+});
+ipcMain.handle('story:write', async (_e, repo, language, storyText, textText) => {
+  try {
+    const data = storyFolder(repo);
+    if (!STORY_LANG.test(language || '')) throw new Error('bad language');
+    if (typeof storyText !== 'string' || typeof textText !== 'string') throw new Error('nothing to write');
+    fs.mkdirSync(path.join(data, 'text'), { recursive: true });
+    writeFileDurable(path.join(data, 'story.json'), storyText);
+    writeFileDurable(path.join(data, 'text', language + '.json'), textText);
+    return { ok: true };
+  } catch (err) {
+    logError('story write', err);
+    return { error: String(err.message || err) };
+  }
+});
+
 ipcMain.handle('import:pick', async (_e, opts) => {
   const win = BrowserWindow.getFocusedWindow();
   const chapters = !!(opts && opts.chapters);

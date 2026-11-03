@@ -2425,9 +2425,8 @@ html:lang(ko) :is(#aux-paper h2, .pen-slot, .shelf-label, .shelf-bound-mark, .pt
   content: attr(data-who);
   position: absolute; right: calc(100% + 12px); top: 0.25em; width: calc(var(--page-pad-x) - 16px); text-align: right;
   font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8a857a;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  pointer-events: none;
+  font-size: 10.5px; line-height: 1.25; letter-spacing: 0.5px; text-transform: uppercase; color: #8a857a;
+  overflow-wrap: anywhere; pointer-events: none;
 }
 .chapter-body.dialogue-body p:not([data-who])::before { content: '?'; color: var(--red); }
 #dlg-speaker {
@@ -2436,3 +2435,13 @@ html:lang(ko) :is(#aux-paper h2, .pen-slot, .shelf-label, .shelf-bound-mark, .pt
   color: #5a554b; background: var(--paper); border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 4px;
 }
 body.night .dlg-panel, body.night .dlg-label, body.night .chapter-body.dialogue-body p::before { color: #918b7d; }
+/* the title page of a dialogue book: where its story lives in the game */
+#tp-dialogue {
+  margin-top: 48px; text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; font-size: 12.5px; color: #8a857a;
+  user-select: none;
+}
+#tp-dialogue .dlg-where { word-break: break-all; margin-bottom: 10px; }
+#tp-dialogue .dlg-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+#tp-dialogue .dlg-btn:disabled { opacity: 0.45; cursor: default; }
+#tp-dialogue .dlg-count { margin-top: 10px; color: var(--red); }

@@ -106,7 +106,7 @@ test('Enter: the next line keeps the speaker but not the line\'s game id', async
 test('Create linked: the next dialogue, the same characters, this one read first and leading to it', async () => {
   await js(`(() => { const s = document.getElementById('dlg-speaker'); s.value = 'the_smith'; s.dispatchEvent(new Event('change')); })()`);
   await tick(100);
-  await js('document.querySelector(".dlg-linked").click()');
+  await js('document.querySelector(".dlg-panel .dlg-linked").click()');
   await tick(400);
   const [a, b] = await js('book.chapterOrder');
   assert.deepEqual(await js(`dlgChapter(${JSON.stringify(b)})`), { id: 'succy_02', idAuto: false, characters: ['succy', 'the_smith'], events: [], reads: [a], next: [] });
@@ -149,6 +149,105 @@ test('book.json holds the characters, the events and each dialogue', async () =>
   assert.deepEqual(d.dialogue.characters.map((c) => c.id), ['succy', 'the_smith']);
   assert.deepEqual(d.dialogue.events.map((e) => e.id), ['chest_built']);
   assert.deepEqual(d.chapterOrder.map((k) => d.dialogue.chapters[k].id), ['succy_01', 'succy_02']);
+});
+
+// ---- the game's story files ----
+const D = require('../dialogue.js');
+const game = path.join(tmp, 'BlackestSmith');
+fs.mkdirSync(path.join(game, 'data', 'text'), { recursive: true });
+const GAME_STORY = {
+  characters: [{ id: 'smith', name: 'The Smith' }],
+  events: [{ id: 'chest_built', description: 'A chest stands in the room.' }],
+  dialogues: [
+    { id: 'imp_talk_01', character: 'imp', requires: { events: [], dialogues: [] }, next: ['imp_talk_02'] },
+    { id: 'imp_talk_02', character: 'smith', requires: { events: [], dialogues: ['imp_talk_01'] }, next: [] },
+    { id: 'imp_chest_01', character: 'imp', requires: { events: ['chest_built'], dialogues: ['imp_talk_02'] }, next: [] }
+  ]
+};
+const GAME_TEXT = { imp_talk_01: 'Boss!', imp_talk_02: 'Imp.', imp_chest_01: 'It locks!' };
+const storyFile = path.join(game, 'data', 'story.json');
+const textFile = path.join(game, 'data', 'text', 'en.json');
+fs.writeFileSync(storyFile, D.storyToJson(GAME_STORY));
+fs.writeFileSync(textFile, D.textToJson(GAME_STORY, GAME_TEXT));
+fs.writeFileSync(path.join(game, 'data', 'quarters.json'), '{\n  // the minions\n  "minions": [ { "id": "imp", "name": "Impy" } ]\n}\n');
+const gameBook = async () => {
+  await js(`(async () => {
+    await backToShelf();
+    await createDialogueOnShelf(library.shelves[0]);
+    book.dialogue.source = { repo: ${JSON.stringify(game)}, language: 'en' };
+    await dlgUpdateFromGame();
+  })()`);
+  await tick(600);
+};
+
+test('a game\'s story comes in: a dialogue per conversation, its minions as speakers', async () => {
+  await gameBook();
+  const ids = await js('book.chapterOrder.map((k) => dlgChapter(k).id)');
+  assert.deepEqual(ids, ['imp_talk', 'imp_chest']);
+  assert.deepEqual(await js('dlgChapter(book.chapterOrder[1]).reads'), [await js('book.chapterOrder[0]')]);
+  assert.deepEqual(await js('book.dialogue.gameSpeakers'), [{ id: 'imp', name: 'Impy', source: 'minion' }]);
+  assert.equal(await js(`chapterHTML[book.chapterOrder[0]]`), '<p data-line="imp_talk_01" data-speaker="imp">Boss!</p><p data-line="imp_talk_02" data-speaker="smith">Imp.</p>');
+  assert.equal(await js('document.querySelector(".dialogue-body p").getAttribute("data-who")'), 'Impy');
+  assert.deepEqual(await js('dlgProblems()'), []);
+  assert.match(await js('document.getElementById("tp-dialogue").textContent'), /Update from Game.*Save to Game/);
+});
+
+test('Save to Game with nothing changed leaves the files as they were, byte for byte', async () => {
+  const before = [fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8')];
+  await js('dlgSaveToGame()');
+  await tick(300);
+  assert.deepEqual([fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8')], before);
+});
+
+test('a new line and an edit go into the game, beside what someone else pushed meanwhile', async () => {
+  // the writer: a new line at the end of the first dialogue, and an edit
+  await caretIn(0, 1);
+  await js(`document.execCommand('insertParagraph')`);
+  await tick(60);
+  await type('Get out.');
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.textContent = 'Boss! Hello!'; syncChapter(p.parentElement, book.chapterOrder[0]); })()`);
+  // meanwhile, in the game
+  const s = structuredClone(GAME_STORY);
+  s.dialogues.push({ id: 'smith_01', character: 'smith', requires: { events: [], dialogues: [] }, next: [] });
+  fs.writeFileSync(storyFile, D.storyToJson(s));
+  fs.writeFileSync(textFile, D.textToJson(s, { ...GAME_TEXT, smith_01: 'Heh.' }));
+  await js('dlgSaveToGame()');
+  await tick(800);
+  const r = D.readStory(fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8'));
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.story.dialogues.map((d) => [d.id, d.character, d.next]), [
+    ['imp_talk_01', 'imp', ['imp_talk_02']],
+    ['imp_talk_02', 'smith', ['imp_talk_03']],
+    ['imp_chest_01', 'imp', []],
+    ['smith_01', 'smith', []],
+    ['imp_talk_03', 'smith', []]
+  ]);
+  assert.deepEqual(r.story.dialogues.find((d) => d.id === 'imp_chest_01').requires.dialogues, ['imp_talk_03']);
+  assert.equal(r.text.imp_talk_01, 'Boss! Hello!');
+  assert.equal(r.text.imp_talk_03, 'Get out.');
+  assert.equal(r.text.smith_01, 'Heh.');
+  // the book took in the other line, and its new line kept the id it was given
+  assert.deepEqual(await js('book.chapterOrder.map((k) => dlgChapter(k).id)'), ['imp_talk', 'imp_chest', 'smith']);
+  assert.deepEqual(await js(`[...document.querySelectorAll('.dialogue-body')[0].children].map((p) => [p.getAttribute('data-line'), p.getAttribute('data-speaker')])`),
+    [['imp_talk_01', 'imp'], ['imp_talk_02', 'smith'], ['imp_talk_03', 'smith']]);
+  assert.match(await js(`chapterHTML[book.chapterOrder[0]]`), /data-line="imp_talk_03"[^>]*>Get out\./);
+  await shot('dialogue-game');
+  await js(`document.getElementById('title-page').scrollIntoView()`);
+  await tick(200);
+  await shot('dialogue-title');
+});
+
+test('a line the game no longer has: Update from Game sends its dialogue to Darlings', async () => {
+  const r = D.readStory(fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8'));
+  r.story.dialogues = r.story.dialogues.filter((d) => d.id !== 'smith_01');
+  delete r.text.smith_01;
+  fs.writeFileSync(storyFile, D.storyToJson(r.story));
+  fs.writeFileSync(textFile, D.textToJson(r.story, r.text));
+  const darlings = await js('darlings.length');
+  await js('dlgUpdateFromGame()');
+  await tick(600);
+  assert.deepEqual(await js('book.chapterOrder.map((k) => dlgChapter(k).id)'), ['imp_talk', 'imp_chest']);
+  assert.equal(await js('darlings.length'), darlings + 1);
 });
 
 async function main() {

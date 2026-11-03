@@ -1145,11 +1145,13 @@ async function renderShelves() {
         const pick = await popMenu(e.clientX, e.clientY, [
           { label: t('New Book'), value: 'book' },
           ...(moreOn() ? [{ label: t('New Script'), value: 'script' }] : []),
-          { label: t('New Dialogues'), value: 'dialogue' }
+          { label: t('New Dialogues'), value: 'dialogue' },
+          { label: t('New Dialogues from Game…'), value: 'dialogue-game' }
         ], { from: blank });
         if (pick === 'book') createBookOnShelf(shelf);
         else if (pick === 'script') createScriptOnShelf(shelf);
         else if (pick === 'dialogue') createDialogueOnShelf(shelf);
+        else if (pick === 'dialogue-game') createDialogueOnShelf(shelf, true);
       });
     }
 
@@ -2554,6 +2556,7 @@ async function openBook(bookId) {
   $$('.tab[data-tab="notes"]')[0].textContent = tabName('notes');
   $$('.tab[data-tab="outline"]')[0].textContent = tabName('outline');
   spEditorMode(); // a script, or a book
+  dlgBar(); // a dialogue book's game
 
   renderChapters();
   wordsFromDisk(); // what the book holds is not today's writing (#345)
@@ -7213,6 +7216,7 @@ function scriptTile(el, meta) {
 /* ================================================================== */
 const isDialogue = (meta = book) => !!meta && meta.format === 'dialogue' && !!window.NeoDialogue;
 const DLG = () => window.NeoDialogue;
+const DLG_SOURCES = { story: () => t('Story characters'), minion: () => t('Minions'), recruit: () => t('Recruits') };
 
 // the book's characters, events and chapter settings, made whole
 function dlgMeta() {
@@ -7235,7 +7239,12 @@ function dlgChapter(chId) {
   for (const k of ['characters', 'events', 'reads', 'next']) c[k] = c[k] || [];
   return c;
 }
-const dlgCharName = (id) => (dlgMeta().characters.find((c) => c.id === id) || {}).name || id;
+// who may speak: the story's own characters, then the game's minions
+const dlgAllSpeakers = () => [
+  ...dlgMeta().characters.map((c) => ({ id: c.id, name: c.name, source: 'story' })),
+  ...(dlgMeta().gameSpeakers || []).filter((g) => !dlgMeta().characters.some((c) => c.id === g.id))
+];
+const dlgCharName = (id) => (dlgAllSpeakers().find((c) => c.id === id) || {}).name || id;
 const dlgLabel = (chId) => (book.dialogue && book.dialogue.chapters && book.dialogue.chapters[chId] && book.dialogue.chapters[chId].id) || t('Dialogue');
 
 // A chapter's lines, from its saved HTML: each paragraph's words, speaker
@@ -7260,7 +7269,7 @@ function dlgModel() {
   };
 }
 function dlgProblems() {
-  return DLG().problems(dlgModel(), [], dlgLabel);
+  return DLG().problems(dlgModel(), (dlgMeta().gameSpeakers || []).map((s) => s.id), dlgLabel);
 }
 
 function dlgChanged(chId) {
@@ -7291,6 +7300,7 @@ function dlgShowProblems() {
     list.hidden = !mine.length;
   }
   dlgSpeakerLabels();
+  dlgBar();
 }
 
 // The panel above a chapter's lines: its id, characters, what it waits for
@@ -7336,7 +7346,7 @@ function dlgPanel(sec, chId) {
 
   row(t('Characters'), dlgMulti({
     placeholder: t('Add a character…'),
-    options: () => dlgMeta().characters.map((ch) => ({ value: ch.id, label: ch.name, desc: ch.id })),
+    options: () => dlgAllSpeakers().map((ch) => ({ group: DLG_SOURCES[ch.source] ? DLG_SOURCES[ch.source]() : '', value: ch.id, label: ch.name, desc: ch.id })),
     selected: () => c.characters,
     set: (v) => {
       const firstOne = !c.characters.length && v.length;
@@ -7401,7 +7411,8 @@ async function dlgNewCharacter(typed, chId) {
   const d = dlgMeta();
   let id = DLG().slug(name);
   if (!id) return;
-  const known = d.characters.find((ch) => ch.id === id || ch.name.toLowerCase() === name.toLowerCase());
+  // a minion the game has, or a character the book has, is that one
+  const known = dlgAllSpeakers().find((ch) => ch.id === id || ch.name.toLowerCase() === name.toLowerCase());
   if (known) id = known.id;
   else d.characters.push({ id, name });
   const c = dlgChapter(chId);
@@ -7554,7 +7565,7 @@ function dlgPlaceSpeaker() {
     DLG_SPEAKER.dataset.chapter = chId;
     const opts = [new Option(t('Who says this?'), '')];
     for (const id of c.characters) opts.push(new Option(dlgCharName(id), id));
-    const others = dlgMeta().characters.filter((ch) => !c.characters.includes(ch.id));
+    const others = dlgAllSpeakers().filter((ch) => !c.characters.includes(ch.id));
     if (others.length) {
       const g = document.createElement('optgroup');
       g.label = t('Add to this dialogue');
@@ -7638,7 +7649,246 @@ function wireDialogueBody(body, chId) {
   });
 }
 
-async function createDialogueOnShelf(shelf) {
+// ---- the game's story files: link, update from, save to ----
+// book.dialogue.source is { repo, language }: the game's folder on this
+// computer and the language its text is written in. story-base.json (beside
+// book.json) is the story as the book last read or wrote it, so changes on
+// either side since then come together (NeoDialogue.merge) and neither
+// overwrites the other.
+const dlgSource = () => dlgMeta().source || null;
+const DLG_EMPTY = { story: { characters: [], events: [], dialogues: [] }, text: {} };
+
+async function dlgReadGame() {
+  const src = dlgSource();
+  const r = await window.neo.storyRead(src.repo, src.language || 'en');
+  if (!r || r.error) throw new Error((r && r.error) || t('The game’s story could not be read.'));
+  const read = DLG().readStory(r.story, r.text, `text/${r.language}.json`);
+  if (read.errors.length) throw new Error(read.errors.join('\n'));
+  dlgMeta().gameSpeakers = DLG().gameSpeakers(r.speakers);
+  dlgMeta().languages = r.languages;
+  return { story: read.story, text: read.text };
+}
+async function dlgBase() {
+  const b = await window.neo.readJSON(book.id, 'story-base', null);
+  return b && b.story ? b : DLG_EMPTY;
+}
+const dlgSetBase = (side) => window.neo.writeJSON(book.id, 'story-base', { story: side.story, text: side.text });
+
+// The book as the game's story, the ids the new lines get written into the
+// chapters first, so the lines keep them
+function dlgOurs() {
+  const f = DLG().flatten(dlgModel());
+  const byChapter = new Map();
+  for (const a of f.assigned) (byChapter.get(a.key) || byChapter.set(a.key, []).get(a.key)).push(a);
+  for (const [chId, list] of byChapter) {
+    const body = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
+    const tpl = document.createElement('template');
+    tpl.innerHTML = chapterHTML[chId] || '';
+    const holder = body || tpl.content;
+    const ps = [...holder.querySelectorAll(':scope > p')].filter((p) => !p.classList.contains('scene-break') && !p.classList.contains('ghost'));
+    for (const a of list) if (ps[a.index]) ps[a.index].setAttribute('data-line', a.id);
+    if (body) syncChapter(body, chId);
+    else { chapterHTML[chId] = tpl.innerHTML; persistChapter(chId); }
+  }
+  return { story: f.story, text: f.text };
+}
+
+const dlgEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const dlgLineHtml = (l) => `<p${l.id ? ` data-line="${dlgEsc(l.id)}"` : ''}${l.speaker ? ` data-speaker="${dlgEsc(l.speaker)}"` : ''}>${dlgEsc(l.text) || '<br>'}</p>`;
+const dlgNewKey = () => 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+
+// The book made to hold the story given: a chapter whose first line the
+// story still begins a dialogue with keeps its place, title and notes; a
+// chapter's words change only where its lines did; a new dialogue goes in
+// after the one before it in the story; a chapter whose lines the story no
+// longer has goes to Darlings. A chapter with no lines yet stays.
+async function dlgRebuild(story, text) {
+  const d = dlgMeta();
+  const model = DLG().unflatten(story, text, () => dlgNewKey());
+  // a book with no words yet (just made, to read a game into) lets go of
+  // its empty first dialogue
+  const blank = model.chapters.length && !book.chapterOrder.some((c) => isStory(c) && chapterText(c).trim());
+  const firstLine = new Map();
+  const lineOwner = new Map();
+  for (const chId of book.chapterOrder.filter((c) => isStory(c))) {
+    const ls = dlgLines(chId).filter((l) => l.text.trim());
+    if (ls[0] && ls[0].id) firstLine.set(ls[0].id, chId);
+    for (const l of ls) if (l.id) lineOwner.set(l.id, chId);
+  }
+  // the new chapters' keys, the book's own where a chapter carries on
+  const keyOf = new Map();
+  for (const ch of model.chapters) {
+    const mine = firstLine.get(ch.lines[0].id);
+    if (mine && ![...keyOf.values()].includes(mine)) keyOf.set(ch.key, mine);
+    else keyOf.set(ch.key, ch.key);
+  }
+  const K = (k) => keyOf.get(k) || k;
+  d.characters = model.characters;
+  d.events = model.events;
+  const kept = new Set();
+  let prev = null;
+  for (const ch of model.chapters) {
+    const chId = K(ch.key);
+    kept.add(chId);
+    const old = d.chapters[chId];
+    d.chapters[chId] = {
+      id: old ? old.id : ch.id,
+      idAuto: false,
+      characters: uniqIds([...(old ? old.characters : []), ...ch.characters]),
+      events: ch.events,
+      reads: ch.reads.map(K),
+      next: ch.next.map(K)
+    };
+    const now = dlgLines(chId).filter((l) => l.text.trim()).map((l) => ({ id: l.id, speaker: l.speaker, text: l.text.trim() }));
+    if (!book.chapterOrder.includes(chId)) {
+      const firstStory = book.chapterOrder.findIndex((c) => isStory(c));
+      const at = prev ? book.chapterOrder.indexOf(prev) + 1 : (firstStory < 0 ? book.chapterOrder.length : firstStory);
+      book.chapterOrder.splice(at, 0, chId);
+    }
+    if (JSON.stringify(now) !== JSON.stringify(ch.lines.map((l) => ({ id: l.id, speaker: l.speaker, text: l.text })))) {
+      chapterHTML[chId] = ch.lines.map(dlgLineHtml).join('') || '<p><br></p>';
+      persistChapter(chId);
+    }
+    prev = chId;
+  }
+  const gone = book.chapterOrder.filter((chId) => isStory(chId) && !kept.has(chId) && dlgLines(chId).some((l) => l.text.trim() && l.id));
+  for (const chId of gone) await deleteChapterToDarlings(chId, true);
+  if (blank) for (const chId of book.chapterOrder.filter((c) => isStory(c) && !kept.has(c))) await deleteChapterQuiet(chId);
+  await saveMeta();
+  renderChapters();
+  return { gone: gone.length };
+}
+const uniqIds = (a) => [...new Set(a.filter(Boolean))];
+
+let dlgBusy = false;
+async function dlgLinkGame() {
+  const r = await window.neo.storyPick();
+  if (!r) return;
+  if (r.error) { toast(r.error, 6000); return; }
+  const d = dlgMeta();
+  const fresh = !d.source || d.source.repo !== r.repo;
+  d.source = { repo: r.repo, language: (d.source && d.source.language) || 'en' };
+  // another game's story is a new start: nothing the book read before counts
+  if (fresh) await dlgSetBase(DLG_EMPTY);
+  scheduleMetaSave();
+  await dlgUpdateFromGame();
+}
+
+// Update from Game: what the game has that the book hasn't, into the book
+async function dlgUpdateFromGame() {
+  if (dlgBusy || !dlgSource()) return;
+  dlgBusy = true;
+  try {
+    flushAllSaves();
+    const theirs = await dlgReadGame();
+    const base = await dlgBase();
+    const ours = dlgOurs();
+    const m = DLG().merge(base, ours, theirs);
+    snapshotStructure('update from game');
+    const { gone } = await dlgRebuild(m.story, m.text);
+    await dlgSetBase(theirs);
+    const parts = [t('The book has the game’s story: {n} lines.', { n: m.story.dialogues.length })];
+    if (gone) parts.push(t('{n} dialogues the game no longer has went to Darlings.', { n: gone }));
+    if (m.clashes.length) parts.push(t('Changed in both, the book’s kept: {ids}.', { ids: m.clashes.map((c) => c.id).join(', ') }));
+    toast(parts.join(' '), 7000);
+  } catch (err) {
+    toast(String(err.message || err), 8000);
+  } finally {
+    dlgBusy = false;
+    dlgBar();
+  }
+}
+
+// Save to Game: the book into the game's story.json and text file, over
+// whatever the game gained in the meantime (taken into the book first)
+async function dlgSaveToGame() {
+  if (dlgBusy || !dlgSource()) return;
+  const problems = dlgProblems();
+  if (problems.length) {
+    toast(t('Fix the problems first: {first}', { first: problems[0].text }), 7000);
+    return;
+  }
+  dlgBusy = true;
+  try {
+    flushAllSaves();
+    const theirs = await dlgReadGame();
+    const base = await dlgBase();
+    const ours = dlgOurs();
+    const m = DLG().merge(base, ours, theirs);
+    const theyChanged = JSON.stringify(base) !== JSON.stringify({ story: theirs.story, text: theirs.text });
+    if (theyChanged) {
+      snapshotStructure('update from game');
+      await dlgRebuild(m.story, m.text);
+    }
+    const again = dlgProblems();
+    if (again.length) {
+      await dlgSetBase(theirs);
+      toast(t('The game’s story changed and the book now has it. Fix the problems first: {first}', { first: again[0].text }), 8000);
+      return;
+    }
+    const src = dlgSource();
+    const r = await window.neo.storyWrite(src.repo, src.language || 'en', DLG().storyToJson(m.story), DLG().textToJson(m.story, m.text));
+    if (!r || r.error) throw new Error((r && r.error) || t('The game’s story could not be saved.'));
+    await dlgSetBase(m);
+    toast(t('Saved {n} lines into the game’s story ({lang}).', { n: m.story.dialogues.length, lang: src.language || 'en' }) +
+      (m.clashes.length ? ' ' + t('Changed in both, the book’s kept: {ids}.', { ids: m.clashes.map((c) => c.id).join(', ') }) : ''), 6000);
+  } catch (err) {
+    toast(String(err.message || err), 8000);
+  } finally {
+    dlgBusy = false;
+    dlgBar();
+  }
+}
+
+// The title page of a dialogue book: where its story lives in the game,
+// the two buttons, and the problems across the book
+function dlgBar() {
+  let bar = $('#tp-dialogue');
+  if (!book || !isDialogue()) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'tp-dialogue';
+    bar.contentEditable = 'false';
+    $('#title-page').appendChild(bar);
+  }
+  const src = dlgSource();
+  const all = dlgProblems();
+  bar.replaceChildren();
+  const where = document.createElement('div');
+  where.className = 'dlg-where';
+  where.textContent = src
+    ? t('The game’s story in {repo} · {lang}', { repo: src.repo, lang: src.language || 'en' })
+    : t('Not linked to a game yet. Link it to read the story in and save it back.');
+  bar.appendChild(where);
+  const btn = (label, title, run) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dlg-linked dlg-btn';
+    b.textContent = label;
+    b.title = title;
+    b.disabled = dlgBusy;
+    b.onclick = run;
+    return b;
+  };
+  const row = document.createElement('div');
+  row.className = 'dlg-actions';
+  row.appendChild(btn(src ? t('Change Game Folder…') : t('Link to Game Folder…'), t('The game’s folder, the one with data/story.json'), dlgLinkGame));
+  if (src) {
+    row.appendChild(btn(t('Update from Game'), t('Take in what the game’s story has that the book hasn’t'), dlgUpdateFromGame));
+    const save = btn(t('Save to Game'), all.length ? t('Fix the problems listed first.') : t('Write the book into data/story.json and data/text/{lang}.json', { lang: src.language || 'en' }), dlgSaveToGame);
+    save.disabled = dlgBusy || all.length > 0;
+    row.appendChild(save);
+  }
+  bar.appendChild(row);
+  if (all.length) {
+    const p = document.createElement('div');
+    p.className = 'dlg-count';
+    p.textContent = all.length === 1 ? t('1 problem to fix before saving') : t('{n} problems to fix before saving', { n: all.length });
+    bar.appendChild(p);
+  }
+}
+
+async function createDialogueOnShelf(shelf, fromGame = false) {
   const meta = await window.neo.createBook({ author: displayAuthor() });
   const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
   await window.neo.writeChapter(meta.id, chId, '<p><br></p>');
@@ -7654,6 +7904,8 @@ async function createDialogueOnShelf(shelf) {
   await placeTitle(shelf, meta.id);
   await writeLibrary(library);
   await openBook(meta.id);
+  // from the game: its whole story, read in
+  if (fromGame) await dlgLinkGame();
 }
 
 /* ================================================================== */

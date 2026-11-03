@@ -126,3 +126,72 @@ test('problems: ids, speakers, unknown events and dialogues, loops', () => {
   ]);
   assert.deepEqual(D.problems(D.unflatten(STORY, TEXT, keys), ['imp']), []);
 });
+
+// ---- the game's files ----
+
+// story.json as the Writer writes it (its own comment at the top)
+const STORY_JSON = D.storyToJson(STORY);
+
+test('story.json and the text file are written the way the Writer writes them', () => {
+  assert.ok(STORY_JSON.startsWith('{\n  // The story: who speaks besides the minions'));
+  assert.ok(STORY_JSON.includes('\n  "characters": [\n    { "id": "smith", "name": "The Smith" },\n'));
+  assert.ok(STORY_JSON.includes('\n    { "id": "imp_talk_02", "character": "imp", "requires": { "events": [], "dialogues": ["imp_talk_01"] }, "next": ["imp_talk_03"] },\n'));
+  assert.ok(STORY_JSON.endsWith('"next": [] }\n  ]\n}\n'));
+  assert.ok(D.storyToJson({ characters: [], events: [], dialogues: [] }).endsWith('kept.\n  "characters": [],\n\n  "events": [],\n\n  "dialogues": []\n}\n'));
+  assert.equal(D.textToJson(STORY, { imp_talk_02: 'Two’s "quoted".', imp_talk_01: 'One.', stray: 'x' }),
+    '{\n  "imp_talk_01": "One.",\n  "imp_talk_02": "Two’s \\"quoted\\".",\n  "stray": "x"\n}\n');
+  assert.equal(D.textToJson(STORY, {}), '{\n}\n');
+});
+
+test('they read back as they were, comments, trailing commas and all', () => {
+  const r = D.readStory(STORY_JSON, D.textToJson(STORY, TEXT));
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.story, STORY);
+  assert.deepEqual(r.text, TEXT);
+  assert.equal(D.storyToJson(r.story), STORY_JSON);
+  assert.deepEqual(D.parseJsonc('{ /* a */ "a": "// not a comment", // one\n "b": [1, 2,], }'), { a: '// not a comment', b: [1, 2] });
+  const bad = D.readStory('{ "dialogues": [ }', null);
+  assert.equal(bad.errors.length, 1);
+  assert.deepEqual(bad.story.dialogues, []);
+});
+
+test('the game\'s speakers: minions from the quarters and the warhost, recruits from HR', () => {
+  const s = D.gameSpeakers({
+    'quarters.json': '{ // who lives here\n "minions": [ { "id": "imp", "name": "Imp", "kind": "x" }, ] }',
+    'commissions.json': '{ "minions": [ { "id": "imp", "name": "Imp again" }, { "id": "ogre" } ] }',
+    'hr.json': '{ "candidates": [ { "id": "gob", "name": "Gob" } ] }'
+  });
+  assert.deepEqual(s, [{ id: 'imp', name: 'Imp', source: 'minion' }, { id: 'ogre', name: 'ogre', source: 'minion' }, { id: 'gob', name: 'Gob', source: 'recruit' }]);
+  assert.deepEqual(D.gameSpeakers({ 'quarters.json': null, 'hr.json': 'not json' }), []);
+});
+
+test('merge: each side\'s changes are kept; where both changed one, the book\'s', () => {
+  const base = { story: structuredClone(STORY), text: { ...TEXT } };
+  const ours = structuredClone(base);
+  const theirs = structuredClone(base);
+  // the book rewrites a line and adds a dialogue
+  ours.text.imp_talk_01 = 'Ours.';
+  ours.story.dialogues.push({ id: 'new_01', character: 'imp', requires: { events: [], dialogues: [] }, next: [] });
+  ours.text.new_01 = 'New.';
+  // the game gains an event and a dialogue, loses one, and rewrites another line
+  theirs.story.events.push({ id: 'door_open', description: 'The door is open.' });
+  theirs.story.dialogues = theirs.story.dialogues.filter((d) => d.id !== 'smith_01');
+  theirs.story.dialogues.push({ id: 'theirs_01', character: 'smith', requires: { events: ['door_open'], dialogues: [] }, next: [] });
+  theirs.text.theirs_01 = 'Theirs.';
+  delete theirs.text.smith_01;
+  theirs.text.imp_talk_02 = 'Their edit.';
+  // and both rewrite the same line
+  ours.text.imp_talk_03 = 'Mine.';
+  theirs.text.imp_talk_03 = 'Yours.';
+  const m = D.merge(base, ours, theirs);
+  assert.deepEqual(m.story.events.map((e) => e.id), ['chest_built', 'door_open']);
+  assert.deepEqual(m.story.dialogues.map((d) => d.id), ['imp_talk_01', 'imp_talk_02', 'imp_talk_03', 'imp_chest_01', 'smith_reply_01', 'narrator_01', 'theirs_01', 'new_01']);
+  assert.equal(m.text.imp_talk_01, 'Ours.');
+  assert.equal(m.text.imp_talk_02, 'Their edit.');
+  assert.equal(m.text.imp_talk_03, 'Mine.');
+  assert.equal(m.text.theirs_01, 'Theirs.');
+  assert.ok(!('smith_01' in m.text));
+  assert.deepEqual(m.clashes, [{ kind: 'text', id: 'imp_talk_03' }]);
+  // nothing changed anywhere: the story as it was
+  assert.deepEqual(D.merge(base, base, base), { ...base, clashes: [] });
+});
