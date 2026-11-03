@@ -417,7 +417,51 @@
     return { story, text, clashes };
   }
 
-  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop, parseJsonc, readStory, gameSpeakers, storyToJson, textToJson, merge };
+  // ---- the story tree ----
+  // Where each dialogue sits in the tree, as the Writer draws it: a
+  // dialogue's level is the longest path to it from one that starts a
+  // conversation (a solid "next", or a dashed "read first" where it isn't
+  // already a next); across a level each sits under its parents. chapters:
+  // [{ key, next, reads }]. Returns { level: Map, slot: Map, edges, levels, slots }.
+  function treeLayout(chapters) {
+    const keys = new Set(chapters.map((c) => c.key));
+    const edges = [];
+    for (const c of chapters) for (const n of c.next || []) if (keys.has(n) && n !== c.key) edges.push({ from: c.key, to: n, kind: 'next' });
+    for (const c of chapters) {
+      for (const r of c.reads || []) {
+        if (keys.has(r) && r !== c.key && !edges.some((e) => e.from === r && e.to === c.key)) edges.push({ from: r, to: c.key, kind: 'read' });
+      }
+    }
+    const level = new Map(chapters.map((c) => [c.key, 0]));
+    // loops stop growing after one pass per dialogue
+    for (let pass = 0; pass < chapters.length; pass++) {
+      let moved = false;
+      for (const e of edges) {
+        const want = level.get(e.from) + 1;
+        if (level.get(e.to) < want && want < chapters.length) { level.set(e.to, want); moved = true; }
+      }
+      if (!moved) break;
+    }
+    const byLevel = [];
+    for (const c of chapters) (byLevel[level.get(c.key)] = byLevel[level.get(c.key)] || []).push(c.key);
+    const slot = new Map();
+    byLevel.forEach((ids, lv) => {
+      const parentSlot = (id) => {
+        const s = edges.filter((e) => e.to === id && level.get(e.from) < lv && slot.has(e.from)).map((e) => slot.get(e.from));
+        return s.length ? s.reduce((a, b) => a + b, 0) / s.length : Infinity;
+      };
+      const order = (ids || []).map((id, i) => ({ id, k: parentSlot(id), i })).sort((a, b) => a.k - b.k || a.i - b.i);
+      let next = 0;
+      for (const { id, k } of order) {
+        const sl = Number.isFinite(k) ? Math.max(next, Math.round(k)) : next;
+        slot.set(id, sl);
+        next = sl + 1;
+      }
+    });
+    return { level, slot, edges, levels: byLevel.length, slots: Math.max(0, ...[...slot.values()].map((v) => v + 1)) };
+  }
+
+  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop, parseJsonc, readStory, gameSpeakers, storyToJson, textToJson, merge, treeLayout };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.NeoDialogue = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -7788,7 +7788,7 @@ async function dlgUpdateFromGame() {
     const { gone } = await dlgRebuild(m.story, m.text);
     await dlgSetBase(theirs);
     const parts = [t('The book has the game’s story: {n} lines.', { n: m.story.dialogues.length })];
-    if (gone) parts.push(t('{n} dialogues the game no longer has went to Darlings.', { n: gone }));
+    if (gone) parts.push(gone === 1 ? t('A dialogue the game no longer has went to Darlings.') : t('{n} dialogues the game no longer has went to Darlings.', { n: gone }));
     if (m.clashes.length) parts.push(t('Changed in both, the book’s kept: {ids}.', { ids: m.clashes.map((c) => c.id).join(', ') }));
     toast(parts.join(' '), 7000);
   } catch (err) {
@@ -7886,6 +7886,126 @@ function dlgBar() {
     p.textContent = all.length === 1 ? t('1 problem to fix before saving') : t('{n} problems to fix before saving', { n: all.length });
     bar.appendChild(p);
   }
+}
+
+// ---- the story tree: the Outline tab of a dialogue book ----
+// Every dialogue as a box, the Writer's way: a solid arrow to the
+// dialogue that comes next, a dashed one where one only needs another read
+// first, ⚑ for the events it waits for. Filter by speaker or search for a
+// word or id; click a box to write in it.
+const DLG_NODE_W = 210, DLG_NODE_H = 78, DLG_GAP_X = 18, DLG_GAP_Y = 42, DLG_PAD = 16;
+const SVGNS = 'http://www.w3.org/2000/svg';
+function dlgSvg(tag, attrs = {}, text) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+const dlgClip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+let dlgTreeSpeaker = '';
+let dlgTreeQuery = '';
+
+function dlgTree() {
+  let wrap = $('#dlg-tree');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'dlg-tree';
+    $('#aux-paper').appendChild(wrap);
+  }
+  wrap.hidden = false;
+  $('#aux-paper').classList.add('dlg-tree-on');
+  $('#editor-view').classList.add('dlg-tree-view'); // the window's whole width, as the cards have
+  const model = dlgModel();
+  const problems = dlgProblems();
+  const L = DLG().treeLayout(model.chapters);
+
+  const head = document.createElement('div');
+  head.className = 'dlg-tree-head';
+  const who = document.createElement('select');
+  who.setAttribute('aria-label', t('Speaker'));
+  who.appendChild(new Option(t('Everyone'), ''));
+  for (const s of dlgAllSpeakers()) who.appendChild(new Option(s.name, s.id));
+  who.value = dlgTreeSpeaker;
+  who.onchange = () => { dlgTreeSpeaker = who.value; dlgTree(); };
+  const find = document.createElement('input');
+  find.type = 'search';
+  find.placeholder = t('Find a line or id');
+  find.value = dlgTreeQuery;
+  find.spellcheck = false;
+  find.addEventListener('keydown', (e) => e.stopPropagation());
+  find.oninput = () => { dlgTreeQuery = find.value; drawNodes(); };
+  const legend = document.createElement('div');
+  legend.className = 'dlg-legend';
+  legend.innerHTML = `<span><i class="ln next"></i>${dlgEsc(t('comes next'))}</span><span><i class="ln read"></i>${dlgEsc(t('needs it read first'))}</span><span>⚑ ${dlgEsc(t('needs the event'))}</span><span><i class="sw bad"></i>${dlgEsc(t('has a problem'))}</span>`;
+  head.append(who, find, legend);
+
+  const scroll = document.createElement('div');
+  scroll.className = 'dlg-tree-scroll';
+  const svg = dlgSvg('svg', { class: 'dlg-tree-svg' });
+  scroll.appendChild(svg);
+  wrap.replaceChildren(head, scroll);
+
+  const x = (k) => DLG_PAD + L.slot.get(k) * (DLG_NODE_W + DLG_GAP_X);
+  const y = (k) => DLG_PAD + L.level.get(k) * (DLG_NODE_H + DLG_GAP_Y);
+  svg.setAttribute('width', DLG_PAD * 2 + Math.max(1, L.slots) * (DLG_NODE_W + DLG_GAP_X) - DLG_GAP_X);
+  svg.setAttribute('height', DLG_PAD * 2 + Math.max(1, L.levels) * (DLG_NODE_H + DLG_GAP_Y) - DLG_GAP_Y);
+  const defs = dlgSvg('defs');
+  const marker = dlgSvg('marker', { id: 'dlg-arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' });
+  marker.appendChild(dlgSvg('path', { d: 'M0,0 L10,5 L0,10 z', class: 'dlg-arrowhead' }));
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+  if (!model.chapters.length) {
+    svg.appendChild(dlgSvg('text', { x: DLG_PAD, y: DLG_PAD + 16, class: 'dlg-empty' }, t('No dialogues yet.')));
+    return;
+  }
+  for (const e of L.edges) {
+    const x1 = x(e.from) + DLG_NODE_W / 2, y1 = y(e.from) + DLG_NODE_H, x2 = x(e.to) + DLG_NODE_W / 2, y2 = y(e.to);
+    const bend = Math.max(20, Math.abs(y2 - y1) / 2);
+    svg.appendChild(dlgSvg('path', { d: `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`, class: 'dlg-edge ' + e.kind, 'marker-end': 'url(#dlg-arrow)' }));
+  }
+  const nodes = dlgSvg('g');
+  svg.appendChild(nodes);
+  function drawNodes() {
+    nodes.replaceChildren();
+    const q = dlgTreeQuery.trim().toLowerCase();
+    for (const ch of model.chapters) {
+      const lines = ch.lines.filter((l) => l.text.trim());
+      const speaks = new Set(lines.map((l) => l.speaker));
+      const shown = !dlgTreeSpeaker || speaks.has(dlgTreeSpeaker) || ch.characters.includes(dlgTreeSpeaker);
+      const hit = q && (ch.id.includes(q) || lines.some((l) => l.text.toLowerCase().includes(q) || l.id.includes(q)));
+      const bad = problems.some((p) => p.key === ch.key);
+      const g = dlgSvg('g', { class: 'dlg-node' + (shown ? '' : ' dim') + (hit ? ' hit' : '') + (bad ? ' bad' : ''), transform: `translate(${x(ch.key)},${y(ch.key)})`, tabindex: 0, role: 'button' });
+      const first = lines[0];
+      g.appendChild(dlgSvg('title', {}, `${ch.id}\n` + lines.slice(0, 6).map((l) => `${dlgCharName(l.speaker)}: ${l.text.trim()}`).join('\n') + (ch.events.length ? `\n⚑ ${ch.events.join(', ')}` : '')));
+      g.appendChild(dlgSvg('rect', { width: DLG_NODE_W, height: DLG_NODE_H, rx: 6 }));
+      g.appendChild(dlgSvg('text', { x: 10, y: 18, class: 'nid' }, dlgClip(ch.id, 26) + (lines.length > 1 ? ` · ${lines.length}` : '')));
+      g.appendChild(dlgSvg('text', { x: 10, y: 34, class: 'who' }, dlgClip(ch.characters.map(dlgCharName).join(', ') || t('(nobody yet)'), 32)));
+      g.appendChild(dlgSvg('text', { x: 10, y: 51, class: 'say' }, dlgClip(first ? first.text.trim() : t('(no lines yet)'), 34)));
+      if (ch.events.length) g.appendChild(dlgSvg('text', { x: 10, y: 68, class: 'ev' }, dlgClip('⚑ ' + ch.events.join(', '), 36)));
+      const open = () => { switchTab('manuscript'); dlgGoTo(ch.key); };
+      g.addEventListener('click', open);
+      g.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); open(); } });
+      nodes.appendChild(g);
+    }
+  }
+  drawNodes();
+}
+// the caret at the start of a dialogue's first line
+function dlgGoTo(chId) {
+  const sec = document.querySelector(`#chapters .chapter[data-id="${chId}"]`);
+  const body = sec && sec.querySelector('.chapter-body');
+  if (!body) return;
+  sec.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  body.focus({ preventScroll: true });
+  const p = body.querySelector('p') || body;
+  const r = document.createRange();
+  r.selectNodeContents(p);
+  r.collapse(true);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+  currentChapterId = chId;
+  highlightNav();
 }
 
 async function createDialogueOnShelf(shelf, fromGame = false) {
@@ -9388,7 +9508,8 @@ function switchTab(name) {
   closeCardEditor();
   closeFootnote();
   auxLoad++;
-  $('#editor-view').classList.remove('board-on');
+  $('#editor-view').classList.remove('board-on', 'dlg-tree-view');
+  $('#aux-paper').classList.remove('dlg-tree-on');
   updateZoomDisplay(); // the page's own zoom, not the cards' (#336)
   const scroller = $('#paper-scroll');
   if (book && currentTab && currentTab !== name) {
@@ -9440,7 +9561,7 @@ function switchTab(name) {
   dList.hidden = true;
   oList.hidden = true;
   // the outline's cards, their List/Cards switch and their hint belong to the Outline alone
-  for (const id of ['#outline-board', '#outline-views', '#outline-board-hint']) { const el = $(id); if (el) el.hidden = true; }
+  for (const id of ['#outline-board', '#outline-views', '#outline-board-hint', '#dlg-tree']) { const el = $(id); if (el) el.hidden = true; }
 
   hideSnapshot();
   if (name === 'darlings') {
@@ -9450,6 +9571,11 @@ function switchTab(name) {
     renderSnapList();
     returnTo();
     findHere();
+  } else if (name === 'outline' && isDialogue()) {
+    // a dialogue book's outline is its story tree
+    $('#aux-title').textContent = t('Story tree');
+    dlgTree();
+    returnTo();
   } else if (name === 'outline') {
     $('#aux-title').textContent = tabName('outline');
     oList.hidden = false;

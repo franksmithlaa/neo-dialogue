@@ -195,3 +195,20 @@ test('merge: each side\'s changes are kept; where both changed one, the book\'s'
   // nothing changed anywhere: the story as it was
   assert.deepEqual(D.merge(base, base, base), { ...base, clashes: [] });
 });
+
+test('the story tree: each dialogue below what leads to it, a branch side by side', () => {
+  const L = D.treeLayout([
+    { key: 'a', next: ['b', 'c'], reads: [] },
+    { key: 'b', next: ['d'], reads: ['a'] },
+    { key: 'c', next: [], reads: ['a'] },
+    { key: 'd', next: [], reads: [] },
+    { key: 'e', next: [], reads: ['d'] }, // waits for d, isn't led to
+    { key: 'f', next: ['g'], reads: [] },
+    { key: 'g', next: ['f'], reads: [] } // a loop doesn't hang it
+  ]);
+  const at = (k) => [L.level.get(k), L.slot.get(k)];
+  assert.deepEqual([at('a'), at('b'), at('c'), at('d'), at('e')], [[0, 0], [1, 0], [1, 1], [2, 0], [3, 0]]);
+  assert.deepEqual(L.edges.filter((e) => e.kind === 'read').map((e) => e.from + e.to), ['de']);
+  assert.ok(L.levels <= 7);
+  assert.ok(L.slots >= 2);
+});

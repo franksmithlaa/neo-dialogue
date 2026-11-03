@@ -250,6 +250,25 @@ test('a line the game no longer has: Update from Game sends its dialogue to Darl
   assert.equal(await js('darlings.length'), darlings + 1);
 });
 
+test('the Outline is the story tree: a box per dialogue, arrows between them; a click opens one', async () => {
+  // a branch, so the tree has two sides
+  await js(`(() => { const [a, b] = book.chapterOrder; dlgChapter(a).next = [b]; dlgChanged(); })()`);
+  await js(`document.querySelector('.tab[data-tab="outline"]').click()`);
+  await tick(300);
+  assert.equal(await js('document.getElementById("dlg-tree").hidden'), false);
+  assert.equal(await js('document.getElementById("outline-list").hidden'), true);
+  assert.deepEqual(await js('[...document.querySelectorAll(".dlg-node .nid")].map((t) => t.textContent)'), ['imp_talk · 3', 'imp_chest']);
+  assert.deepEqual(await js('[...document.querySelectorAll(".dlg-edge")].map((e) => e.getAttribute("class"))'), ['dlg-edge next']);
+  await js(`(() => { const s = document.querySelector('.dlg-tree-head input'); s.value = 'locks'; s.dispatchEvent(new Event('input')); })()`);
+  assert.deepEqual(await js('[...document.querySelectorAll(".dlg-node.hit .nid")].map((t) => t.textContent)'), ['imp_chest']);
+  await shot('dialogue-tree');
+  await js(`document.querySelectorAll('.dlg-node')[1].dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  await tick(300);
+  assert.equal(await js('currentTab'), 'manuscript');
+  assert.equal(await js('currentChapterId'), await js('book.chapterOrder[1]'));
+  assert.equal(await js(`document.getElementById('editor-view').classList.contains('dlg-tree-view')`), false);
+});
+
 async function main() {
   await app.whenReady();
   let failed = 0;

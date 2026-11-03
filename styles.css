@@ -2445,3 +2445,33 @@ body.night .dlg-panel, body.night .dlg-label, body.night .chapter-body.dialogue-
 #tp-dialogue .dlg-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 #tp-dialogue .dlg-btn:disabled { opacity: 0.45; cursor: default; }
 #tp-dialogue .dlg-count { margin-top: 10px; color: var(--red); }
+/* the story tree (a dialogue book's Outline): the page grows to hold it */
+#editor-view.dlg-tree-view #paper-scroll { left: 0; right: 0; width: auto; transform: none; }
+#aux-paper.dlg-tree-on { width: min(96%, 1400px); max-width: none; padding-left: 40px; padding-right: 40px; }
+#dlg-tree { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+.dlg-tree-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 12.5px; color: #8a857a; }
+.dlg-tree-head select, .dlg-tree-head input {
+  font: inherit; color: var(--ink); background: transparent;
+  border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 4px; padding: 3px 6px;
+}
+.dlg-tree-head input { min-width: 14em; }
+.dlg-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-left: auto; }
+.dlg-legend .ln { display: inline-block; width: 22px; height: 0; border-top: 2px solid #7a6a60; vertical-align: middle; margin-right: 5px; }
+.dlg-legend .ln.read { border-top-style: dashed; }
+.dlg-legend .sw { display: inline-block; width: 12px; height: 10px; border: 2px solid var(--red); border-radius: 3px; vertical-align: middle; margin-right: 5px; }
+.dlg-tree-scroll { overflow: auto; max-height: calc(100vh - 260px); }
+.dlg-tree-svg { display: block; }
+.dlg-edge { fill: none; stroke: #7a6a60; stroke-width: 1.6; }
+.dlg-edge.read { stroke-dasharray: 5 4; opacity: 0.7; }
+.dlg-arrowhead { fill: #7a6a60; }
+.dlg-node { cursor: pointer; outline: none; }
+.dlg-node rect { fill: var(--paper); stroke: color-mix(in srgb, var(--ink) 25%, transparent); stroke-width: 1.2; }
+.dlg-node:hover rect, .dlg-node:focus rect { stroke: var(--accent); stroke-width: 2; }
+.dlg-node.bad rect { stroke: var(--red); stroke-width: 2; }
+.dlg-node.hit rect { fill: color-mix(in srgb, var(--accent) 22%, var(--paper)); }
+.dlg-node.dim { opacity: 0.3; }
+.dlg-node text { font-size: 11.5px; fill: var(--ink); }
+.dlg-node .nid { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 600; }
+.dlg-node .who { fill: #8a857a; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+.dlg-node .ev { fill: #5a78b0; font-size: 10.5px; }
+.dlg-empty { fill: #8a857a; font-size: 13px; }
