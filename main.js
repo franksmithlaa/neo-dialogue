@@ -2059,6 +2059,14 @@ function storyFolder(repo) {
 async function readIfThere(file) {
   try { return await fs.promises.readFile(file, 'utf8'); } catch (err) { if (err.code === 'ENOENT') return null; throw err; }
 }
+// The game this copy of NEO is for: its folder, when it's on this computer
+// (NEO_GAME_REPO, else C:\Repos\BlackestSmith on Windows)
+ipcMain.handle('story:default', async () => {
+  const repo = process.env.NEO_GAME_REPO || (process.platform === 'win32' ? 'C:\\Repos\\BlackestSmith' : '');
+  if (!repo) return { repo: null };
+  try { storyFolder(repo); } catch { return { repo: null }; }
+  return { repo, name: 'Blackest Smith' };
+});
 ipcMain.handle('story:pick', async () => {
   const win = BrowserWindow.getFocusedWindow();
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {

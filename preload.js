@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('neo', {
   logError: (msg) => ipcRenderer.invoke('log:error', msg),
   importPick: (opts) => ipcRenderer.invoke('import:pick', opts),
   storyPick: () => ipcRenderer.invoke('story:pick'),
+  storyDefault: () => ipcRenderer.invoke('story:default'),
   storyRead: (repo, language) => ipcRenderer.invoke('story:read', repo, language),
   storyWrite: (repo, language, storyText, textText) => ipcRenderer.invoke('story:write', repo, language, storyText, textText),
   storyGitLook: (repo, language) => ipcRenderer.invoke('story:git-look', repo, language),

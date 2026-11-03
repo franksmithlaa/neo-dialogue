@@ -761,6 +761,7 @@ async function loadLibrary() {
   if (!library.firstRunDone) {
     showFirstRun();
   }
+  try { await dlgEnsureGameBook(); } catch (err) { window.neo.logError('game book: ' + ((err && err.message) || err)); }
   renderShelves();
 }
 
@@ -2557,6 +2558,8 @@ async function openBook(bookId) {
   $$('.tab[data-tab="outline"]')[0].textContent = tabName('outline');
   spEditorMode(); // a script, or a book
   dlgBar(); // a dialogue book's game
+  // the game's story as it is now, whatever was pushed since the book was last open
+  if (isDialogue() && dlgSource()) setTimeout(() => dlgUpdateFromGame(true), 0);
 
   renderChapters();
   wordsFromDisk(); // what the book holds is not today's writing (#345)
@@ -7301,6 +7304,7 @@ function dlgShowProblems() {
   }
   dlgSpeakerLabels();
   dlgBar();
+  dlgAutoSaveSoon();
 }
 
 // The panel above a chapter's lines: its id, characters, what it waits for
@@ -7763,6 +7767,29 @@ async function dlgRebuild(story, text) {
 const uniqIds = (a) => [...new Set(a.filter(Boolean))];
 
 let dlgBusy = false;
+let dlgLastSaved = 0;
+
+// A book linked to a game saves into it by itself, the way a chapter saves
+// to disk: a moment after the writing stops, only when the book has
+// something the game hasn't, and not while there are problems (the title
+// page says so). Push and the buttons still do it by hand.
+let dlgAutoTimer = null;
+function dlgAutoSaveSoon(ms = 1500) {
+  clearTimeout(dlgAutoTimer);
+  if (!book || !isDialogue() || !dlgSource()) return;
+  dlgAutoTimer = setTimeout(dlgAutoSave, ms);
+}
+async function dlgAutoSave() {
+  if (!book || !isDialogue() || !dlgSource()) return;
+  if (dlgBusy) { dlgAutoSaveSoon(2000); return; }
+  if (dlgProblems().length) return;
+  // nothing new since the game last had the book's words: nothing to do
+  const base = await dlgBase();
+  const f = DLG().flatten(dlgModel());
+  if (!f.assigned.length && dlgSameSide({ story: f.story, text: f.text }, base)) return;
+  await dlgSaveToGame(true);
+}
+
 async function dlgLinkGame() {
   const r = await window.neo.storyPick();
   if (!r) return;
@@ -7776,16 +7803,24 @@ async function dlgLinkGame() {
   await dlgUpdateFromGame();
 }
 
-// Update from Game: what the game has that the book hasn't, into the book
-async function dlgUpdateFromGame() {
+// Update from Game: what the game has that the book hasn't, into the book.
+// quiet (opening the book, coming back to the window): a word only when
+// something came in, and the page left alone when nothing did.
+async function dlgUpdateFromGame(quiet = false) {
   if (dlgBusy || !dlgSource()) return;
   dlgBusy = true;
+  const bookId = book.id;
   try {
-    flushAllSaves();
+    if (!quiet) flushAllSaves();
     const theirs = await dlgReadGame();
+    if (!book || book.id !== bookId) return;
     const base = await dlgBase();
     const ours = dlgOurs();
     const m = DLG().merge(base, ours, theirs);
+    if (quiet && dlgSameSide(m, ours)) {
+      if (!dlgSameSide(base, theirs)) await dlgSetBase(theirs);
+      return;
+    }
     snapshotStructure('update from game');
     const { gone } = await dlgRebuild(m.story, m.text);
     await dlgSetBase(theirs);
@@ -7803,22 +7838,24 @@ async function dlgUpdateFromGame() {
 
 // Save to Game: the book into the game's story.json and text file, over
 // whatever the game gained in the meantime (taken into the book first)
-async function dlgSaveToGame() {
+async function dlgSaveToGame(quiet = false) {
   if (dlgBusy || !dlgSource()) return;
   const problems = dlgProblems();
   if (problems.length) {
-    toast(t('Fix the problems first: {first}', { first: problems[0].text }), 7000);
+    if (!quiet) toast(t('Fix the problems first: {first}', { first: problems[0].text }), 7000);
     return;
   }
   dlgBusy = true;
+  const bookId = book.id;
   try {
-    flushAllSaves();
+    if (!quiet) flushAllSaves();
     const theirs = await dlgReadGame();
     const base = await dlgBase();
     const ours = dlgOurs();
     const m = DLG().merge(base, ours, theirs);
-    const theyChanged = JSON.stringify(base) !== JSON.stringify({ story: theirs.story, text: theirs.text });
-    if (theyChanged) {
+    if (!book || book.id !== bookId) return;
+    // what the game gained meanwhile comes onto the page (left alone when nothing did)
+    if (!dlgSameSide(m, ours)) {
       snapshotStructure('update from game');
       await dlgRebuild(m.story, m.text);
     }
@@ -7829,11 +7866,21 @@ async function dlgSaveToGame() {
       return;
     }
     const src = dlgSource();
+    if (!book || book.id !== bookId) return;
+    // the game has it all already: nothing is written
+    if (dlgSameSide(m, theirs)) {
+      await dlgSetBase(theirs);
+      if (!quiet) toast(t('The game’s story already has everything in the book.'), 4000);
+      return;
+    }
     const r = await window.neo.storyWrite(src.repo, src.language || 'en', DLG().storyToJson(m.story), DLG().textToJson(m.story, m.text));
     if (!r || r.error) throw new Error((r && r.error) || t('The game’s story could not be saved.'));
     await dlgSetBase(m);
-    toast(t('Saved {n} lines into the game’s story ({lang}).', { n: m.story.dialogues.length, lang: src.language || 'en' }) +
-      (m.clashes.length ? ' ' + t('Changed in both, the book’s kept: {ids}.', { ids: m.clashes.map((c) => c.id).join(', ') }) : ''), 6000);
+    dlgLastSaved = Date.now();
+    if (!quiet || m.clashes.length) {
+      toast(t('Saved {n} lines into the game’s story ({lang}).', { n: m.story.dialogues.length, lang: src.language || 'en' }) +
+        (m.clashes.length ? ' ' + t('Changed in both, the book’s kept: {ids}.', { ids: m.clashes.map((c) => c.id).join(', ') }) : ''), 6000);
+    }
   } catch (err) {
     toast(String(err.message || err), 8000);
   } finally {
@@ -7907,6 +7954,12 @@ function dlgBar() {
     const p = document.createElement('div');
     p.className = 'dlg-count';
     p.textContent = all.length === 1 ? t('1 problem to fix before saving') : t('{n} problems to fix before saving', { n: all.length });
+    if (src) p.textContent += ' · ' + t('the game keeps its last saved story until then');
+    bar.appendChild(p);
+  } else if (src && dlgLastSaved) {
+    const p = document.createElement('div');
+    p.className = 'dlg-saved';
+    p.textContent = t('Saved into the game at {time}', { time: new Date(dlgLastSaved).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) });
     bar.appendChild(p);
   }
 }
@@ -8197,6 +8250,49 @@ function dlgGoTo(chId) {
   sel.addRange(r);
   currentChapterId = chId;
   highlightNav();
+}
+
+// The Blackest Smith book: on a computer that has the game (main.js,
+// story:default), the library gets a dialogue book linked to it, with the
+// game's whole story read in, once. A writer who removes it isn't given
+// another; New Dialogues from Game… makes one any time.
+async function dlgEnsureGameBook() {
+  if (!window.NeoDialogue || !window.neo.storyDefault || (library.gameBook && library.gameBook.repo)) return;
+  const def = await window.neo.storyDefault();
+  if (!def || !def.repo) return;
+  const r = await window.neo.storyRead(def.repo, 'en');
+  if (!r || r.error) return;
+  const read = DLG().readStory(r.story, r.text, 'text/en.json');
+  if (read.errors.length) { window.neo.logError('game book: ' + read.errors.join('; ')); return; }
+  const meta = await window.neo.createBook({ author: displayAuthor(), title: def.name });
+  const model = DLG().unflatten(read.story, read.text, () => dlgNewKey());
+  const chapters = {};
+  for (const ch of model.chapters) {
+    chapters[ch.key] = { id: ch.id, idAuto: false, characters: ch.characters, events: ch.events, reads: ch.reads, next: ch.next };
+    await window.neo.writeChapter(meta.id, ch.key, ch.lines.map(dlgLineHtml).join(''));
+  }
+  if (!model.chapters.length) {
+    const key = dlgNewKey();
+    chapters[key] = { id: 'dialogue_01', idAuto: true, characters: [], events: [], reads: [], next: [] };
+    model.chapters.push({ key });
+    await window.neo.writeChapter(meta.id, key, '<p><br></p>');
+  }
+  meta.title = def.name;
+  meta.format = 'dialogue';
+  meta.chapterOrder = model.chapters.map((c) => c.key);
+  meta.dialogue = {
+    characters: model.characters, events: model.events, chapters,
+    source: { repo: def.repo, language: 'en' },
+    gameSpeakers: DLG().gameSpeakers(r.speakers),
+    languages: r.languages
+  };
+  meta.tabNames = { notes: (library.tabDefaults && library.tabDefaults.notes) || 'Notes', outline: 'Outline' };
+  await writeBookMeta(meta.id, meta);
+  await window.neo.writeJSON(meta.id, 'story-base-en', { story: read.story, text: read.text });
+  const shelf = shelvesFor(currentAuthor().id)[0] || library.shelves[0];
+  if (shelf) await placeTitle(shelf, meta.id, true);
+  library.gameBook = { repo: def.repo, id: meta.id };
+  await writeLibrary(library);
 }
 
 async function createDialogueOnShelf(shelf, fromGame = false) {
@@ -14311,6 +14407,8 @@ async function refreshFromDisk() {
   }
 }
 window.addEventListener('focus', () => setTimeout(refreshFromDisk, 300));
+// a dialogue book looks at its game again when NEO comes back into view
+window.addEventListener('focus', () => setTimeout(() => { if (book && isDialogue() && dlgSource() && currentTab === 'manuscript') dlgUpdateFromGame(true); }, 600));
 // and a quiet look every half minute while NEO is on screen, for the writer
 // who left both machines open
 setInterval(() => { if (document.visibilityState === 'visible') refreshFromDisk(); }, 30000);

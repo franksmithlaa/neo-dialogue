@@ -2481,3 +2481,4 @@ body.night .dlg-panel, body.night .dlg-label, body.night .chapter-body.dialogue-
 .dlg-push li { margin-bottom: 4px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .dlg-push li.fail { color: var(--red); }
 .dlg-push li pre { white-space: pre-wrap; color: #8a857a; font-size: 11px; }
+#tp-dialogue .dlg-saved { margin-top: 10px; }

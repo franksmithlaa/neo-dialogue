@@ -24,6 +24,9 @@ const loadFile = BrowserWindow.prototype.loadFile;
 BrowserWindow.prototype.loadFile = function (file, opts) {
   return loadFile.call(this, path.resolve(__dirname, '..', file), opts);
 };
+// the game this NEO is for (C:\Repos\BlackestSmith on Windows): the library gets its book
+const game = path.join(tmp, 'BlackestSmith');
+process.env.NEO_GAME_REPO = game;
 require('../main.js');
 
 let wc;
@@ -34,7 +37,10 @@ const shot = async (name) => {
   const img = await wc.capturePage();
   fs.writeFileSync(path.join(process.env.NEO_SHOTS, name + '.png'), img.toPNG());
 };
-const bookDir = () => path.join(lib, fs.readdirSync(lib).find((n) => n.startsWith('book-')));
+// the open book's folder
+let openDir = null;
+const bookDir = () => openDir;
+const findDir = async () => { openDir = path.join(lib, await js('book.id')); };
 const onDisk = () => JSON.parse(fs.readFileSync(path.join(bookDir(), 'book.json'), 'utf8'));
 const chapterFile = (id) => fs.readFileSync(path.join(bookDir(), 'chapters', id + '.html'), 'utf8');
 // the caret at the end of a chapter's line
@@ -53,6 +59,56 @@ const type = async (text) => { await js(`document.execCommand('insertText', fals
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
+
+test('the library has the game\'s book from the start, its whole story read in', async () => {
+  assert.equal(await js('library.gameBook.repo'), game);
+  const meta = await js('window.neo.readBookMeta(library.gameBook.id)');
+  assert.equal(meta.title, 'Blackest Smith');
+  assert.equal(meta.format, 'dialogue');
+  assert.deepEqual(meta.chapterOrder.map((k) => meta.dialogue.chapters[k].id), ['imp_talk', 'imp_chest']);
+  assert.deepEqual(meta.dialogue.gameSpeakers, [{ id: 'imp', name: 'Impy', source: 'minion' }]);
+  assert.equal(await js('library.shelves[0].bookIds[0]'), meta.id);
+});
+
+test('the game\'s book saves into the game by itself, a moment after the writing stops', async () => {
+  await js('openBook(library.gameBook.id)');
+  await tick(800);
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.textContent = 'Boss! Saved by itself.'; syncChapter(p.parentElement, book.chapterOrder[0]); dlgShowProblems(); })()`);
+  await tick(2600);
+  assert.equal(D.readStory(fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8')).text.imp_talk_01, 'Boss! Saved by itself.');
+  assert.match(await js('document.getElementById("tp-dialogue").textContent'), /Saved into the game at/);
+  // a line nobody says holds it back, and the title page says why
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.removeAttribute('data-speaker'); p.textContent = 'Held back.'; syncChapter(p.parentElement, book.chapterOrder[0]); dlgShowProblems(); })()`);
+  await tick(2600);
+  assert.equal(D.readStory(fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8')).text.imp_talk_01, 'Boss! Saved by itself.');
+  assert.match(await js('document.getElementById("tp-dialogue").textContent'), /1 problem to fix before saving/);
+  // the game's own words again, for what follows
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.setAttribute('data-speaker', 'imp'); p.textContent = 'Boss!'; syncChapter(p.parentElement, book.chapterOrder[0]); dlgShowProblems(); })()`);
+  await tick(2600);
+  assert.equal(D.readStory(fs.readFileSync(storyFile, 'utf8'), fs.readFileSync(textFile, 'utf8')).text.imp_talk_01, 'Boss!');
+});
+
+test('opening the book again reads what the game gained meanwhile', async () => {
+  await js('backToShelf()');
+  await tick(300);
+  const s = structuredClone(GAME_STORY);
+  s.dialogues.push({ id: 'aside_01', character: 'smith', requires: { events: [], dialogues: [] }, next: [] });
+  fs.writeFileSync(storyFile, D.storyToJson(s));
+  fs.writeFileSync(textFile, D.textToJson(s, { ...GAME_TEXT, aside_01: 'Meanwhile.' }));
+  await js('openBook(library.gameBook.id)');
+  await tick(1000);
+  assert.deepEqual(await js('book.chapterOrder.map((k) => dlgChapter(k).id)'), ['imp_talk', 'imp_chest', 'aside']);
+  // and puts the game back as the tests after this expect it
+  fs.writeFileSync(storyFile, D.storyToJson(GAME_STORY));
+  fs.writeFileSync(textFile, D.textToJson(GAME_STORY, GAME_TEXT));
+  await js('dlgUpdateFromGame(true)');
+  await tick(600);
+  await js('backToShelf()');
+  await tick(300);
+  await js('createDialogueOnShelf(library.shelves[0])');
+  await tick(600);
+  await findDir();
+});
 
 test('a new dialogue book: its chapter is a dialogue, with its panel', async () => {
   assert.equal(await js('book.format'), 'dialogue');
@@ -153,7 +209,6 @@ test('book.json holds the characters, the events and each dialogue', async () =>
 
 // ---- the game's story files ----
 const D = require('../dialogue.js');
-const game = path.join(tmp, 'BlackestSmith');
 fs.mkdirSync(path.join(game, 'data', 'text'), { recursive: true });
 const GAME_STORY = {
   characters: [{ id: 'smith', name: 'The Smith' }],
@@ -406,10 +461,8 @@ async function main() {
     wc = win.webContents;
     while (!(await js(`typeof library !== 'undefined' && !!library && Array.isArray(library.shelves)`).catch(() => false))) await tick(50);
     await tick(300);
-    await js(`(async () => {
-      document.getElementById('firstrun').hidden = true;
-      await createDialogueOnShelf(library.shelves[0]);
-    })()`);
+    await js(`document.getElementById('firstrun').hidden = true`);
+    while (!(await js('!!(library.gameBook && library.gameBook.id)'))) await tick(50);
     await tick(600);
     win.focus();
     for (const t of tests) {
