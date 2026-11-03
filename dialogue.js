@@ -1,0 +1,284 @@
+'use strict';
+
+// Dialogue books: NEO's chapters as a game's dialogues (the Blackest Smith
+// Writer's story format, data/story.json and data/text/<language>.json).
+// Plain JavaScript with no window, so it runs in Node for the tests and in
+// the page as window.NeoDialogue.
+//
+// In the book, a chapter is one dialogue: the characters in it, what it
+// waits for (story events that have happened, other dialogues that have
+// been read) and the dialogues that come next. Each of its paragraphs is a
+// line, said by one of its characters.
+//
+// In the game, the unit is the line: one id, one speaker, one sentence of
+// speech, its preconditions and the lines that follow it. flatten() turns a
+// book into the game's lines and unflatten() puts the game's lines back
+// into chapters, so a story round-trips:
+//   - the lines of a chapter follow one another ("next"), and each needs
+//     the one before it read (as the Writer's Create linked does);
+//   - the first line carries the chapter's own preconditions, with each
+//     dialogue it needs standing for that dialogue's last line;
+//   - the last line leads to the first line of each dialogue that comes next.
+//
+// The model the functions take (book.json keeps all but the lines, which
+// are the chapter's paragraphs):
+//   { characters: [{ id, name }], events: [{ id, description }],
+//     chapters: [{ key, id, characters: [id], events: [id], reads: [key],
+//                  next: [key], lines: [{ id, speaker, text }] }] }
+// A chapter is named by its key (NEO's chapter id) inside the book, and by
+// its dialogue id in the game. A line's id may be empty until it is first
+// written out: flatten() gives it the next free <dialogue id>_NN.
+
+(function (root) {
+  const ID = /^[a-z0-9_]+$/;
+
+  // what a typed id becomes: lower case letters, digits and underscores
+  function slug(text) {
+    return String(text || '').trim().toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  }
+
+  // the first of prefix_01, prefix_02… not in used (a Set)
+  function nextId(prefix, used) {
+    const p = slug(prefix) || 'line';
+    for (let n = 1; ; n++) {
+      const id = p + '_' + String(n).padStart(2, '0');
+      if (!used.has(id)) return id;
+    }
+  }
+
+  // the id after another: succy_talk_04 → succy_talk_05 (or the next free
+  // one); an id with no number after it starts at _01
+  function idAfter(id, used) {
+    const m = /^(.*)_(\d+)$/.exec(id || '');
+    if (!m) return nextId(id, used);
+    const width = Math.max(2, m[2].length);
+    for (let n = Number(m[2]) + 1; ; n++) {
+      const next = m[1] + '_' + String(n).padStart(width, '0');
+      if (!used.has(next)) return next;
+    }
+  }
+
+  // a dialogue's name from its first line: succy_talk_01 → succy_talk
+  const baseOf = (lineId) => String(lineId || '').replace(/_\d+$/, '') || lineId;
+
+  const uniq = (list) => [...new Set((list || []).filter(Boolean))];
+
+  // The chapters' lines with ids: the line's own, unless it's empty, badly
+  // formed or already taken (a paragraph split in two carries its id into
+  // both halves; the first keeps it). Returns the lines per chapter key
+  // and the ids handed out, for the book to keep.
+  function lineIds(model) {
+    const used = new Set();
+    for (const ch of model.chapters) for (const l of ch.lines) if (l.id && ID.test(l.id)) used.add(l.id);
+    const seen = new Set();
+    const lines = new Map();
+    const assigned = [];
+    for (const ch of model.chapters) {
+      const out = [];
+      ch.lines.forEach((l, index) => {
+        if (!String(l.text || '').trim()) return; // an empty paragraph is no line
+        let id = l.id && ID.test(l.id) && !seen.has(l.id) ? l.id : '';
+        if (!id) {
+          id = nextId(ch.id || 'line', used);
+          used.add(id);
+          assigned.push({ key: ch.key, index, id });
+        }
+        seen.add(id);
+        out.push({ id, speaker: l.speaker || '', text: String(l.text).trim() });
+      });
+      lines.set(ch.key, out);
+    }
+    return { lines, assigned };
+  }
+
+  // The book as the game's story: { characters, events, dialogues } as
+  // story.json holds them, and the text of each line by its id.
+  function flatten(model) {
+    const { lines, assigned } = lineIds(model);
+    const first = (key) => (lines.get(key) || [])[0];
+    const last = (key) => (lines.get(key) || []).at(-1);
+    const dialogues = [];
+    const text = {};
+    for (const ch of model.chapters) {
+      const ls = lines.get(ch.key);
+      ls.forEach((l, i) => {
+        const isFirst = i === 0;
+        const isLast = i === ls.length - 1;
+        dialogues.push({
+          id: l.id,
+          character: l.speaker,
+          requires: {
+            events: isFirst ? uniq(ch.events) : [],
+            dialogues: isFirst ? uniq((ch.reads || []).map((k) => last(k) && last(k).id)) : [ls[i - 1].id]
+          },
+          next: isLast ? uniq((ch.next || []).map((k) => first(k) && first(k).id)) : [ls[i + 1].id]
+        });
+        text[l.id] = l.text;
+      });
+    }
+    return {
+      story: {
+        characters: (model.characters || []).map((c) => ({ id: c.id, name: c.name || c.id })),
+        events: (model.events || []).map((e) => ({ id: e.id, description: e.description || '' })),
+        dialogues
+      },
+      text,
+      assigned
+    };
+  }
+
+  // The game's story as chapters. A line carries on the dialogue of the line
+  // before it when that line leads only to it, nothing else leads to it, it
+  // needs only that line read and no event, and nothing else waits for that
+  // line in particular. makeKey() names each new chapter.
+  function unflatten(story, text, makeKey) {
+    const ds = (story && story.dialogues) || [];
+    const byId = new Map(ds.map((d) => [d.id, d]));
+    const req = (d) => (d.requires && d.requires.dialogues) || [];
+    const evs = (d) => (d.requires && d.requires.events) || [];
+    const ledFrom = new Map();
+    const neededBy = new Map();
+    for (const d of ds) {
+      for (const n of d.next || []) (ledFrom.get(n) || ledFrom.set(n, []).get(n)).push(d.id);
+      for (const r of req(d)) (neededBy.get(r) || neededBy.set(r, []).get(r)).push(d.id);
+    }
+    const continues = (d) => {
+      const from = ledFrom.get(d.id) || [];
+      if (from.length !== 1) return false;
+      const prev = byId.get(from[0]);
+      if (!prev || prev === d || (prev.next || []).length !== 1) return false;
+      if (evs(d).length || req(d).length !== 1 || req(d)[0] !== prev.id) return false;
+      return (neededBy.get(prev.id) || []).every((id) => id === d.id);
+    };
+    const chapterOf = new Map();
+    const chapters = [];
+    const taken = new Set();
+    for (const head of ds) {
+      if (continues(head) || chapterOf.has(head.id)) continue;
+      const lines = [];
+      for (let d = head; d && !chapterOf.has(d.id); ) {
+        lines.push(d);
+        const n = (d.next || []).length === 1 ? byId.get(d.next[0]) : null;
+        d = n && continues(n) ? n : null;
+      }
+      let id = baseOf(head.id);
+      if (taken.has(id) || byId.has(id) && id !== head.id) id = head.id;
+      taken.add(id);
+      const ch = { key: makeKey(chapters.length), id, characters: [], events: [], reads: [], next: [], lines: [] };
+      for (const d of lines) chapterOf.set(d.id, ch);
+      ch.lines = lines.map((d) => ({ id: d.id, speaker: d.character || '', text: (text && text[d.id]) || '' }));
+      ch.characters = uniq(lines.map((d) => d.character));
+      ch.events = uniq(evs(head));
+      ch._reads = req(head);
+      ch._next = (lines.at(-1).next || []);
+      chapters.push(ch);
+    }
+    // a loop of lines that each continue the one before has no head: each
+    // of its lines left over starts a chapter of its own
+    for (const d of ds) {
+      if (chapterOf.has(d.id)) continue;
+      const ch = { key: makeKey(chapters.length), id: d.id, characters: uniq([d.character]), events: uniq(evs(d)), reads: [], next: [], lines: [{ id: d.id, speaker: d.character || '', text: (text && text[d.id]) || '' }], _reads: req(d), _next: d.next || [] };
+      chapterOf.set(d.id, ch);
+      chapters.push(ch);
+    }
+    const unknown = [];
+    const keyOf = (id) => {
+      const ch = chapterOf.get(id);
+      if (!ch) unknown.push(id);
+      return ch && ch.key;
+    };
+    for (const ch of chapters) {
+      ch.reads = uniq(ch._reads.map(keyOf));
+      ch.next = uniq(ch._next.map(keyOf));
+      delete ch._reads;
+      delete ch._next;
+    }
+    return {
+      characters: ((story && story.characters) || []).map((c) => ({ id: c.id, name: c.name || c.id })),
+      events: ((story && story.events) || []).map((e) => ({ id: e.id, description: e.description || '' })),
+      chapters,
+      unknown: uniq(unknown)
+    };
+  }
+
+  // Everything that would stop the game loading the story, in the writer's
+  // terms. speakers: every id that may speak (the book's characters, and
+  // the game's own, such as its minions). name(key) names a chapter.
+  function problems(model, speakers, name) {
+    const out = [];
+    const nameOf = name || ((k) => k);
+    const can = new Set([...(speakers || []), ...(model.characters || []).map((c) => c.id)]);
+    const events = new Set((model.events || []).map((e) => e.id));
+    const keys = new Set(model.chapters.map((c) => c.key));
+    const dialogueIds = new Map();
+    const checkId = (id, what) => {
+      if (!ID.test(id || '')) out.push({ text: `${what} id "${id || ''}" must be lower case letters, digits and underscores.` });
+    };
+    for (const c of model.characters || []) checkId(c.id, 'Character');
+    for (const e of model.events || []) checkId(e.id, 'Event');
+    for (const ch of model.chapters) {
+      const where = nameOf(ch.key);
+      if (!ch.id) out.push({ key: ch.key, text: `${where} has no dialogue id.` });
+      else if (!ID.test(ch.id)) out.push({ key: ch.key, text: `${where}: the dialogue id "${ch.id}" must be lower case letters, digits and underscores.` });
+      else if (dialogueIds.has(ch.id)) out.push({ key: ch.key, text: `${where} and ${nameOf(dialogueIds.get(ch.id))} share the dialogue id "${ch.id}".` });
+      else dialogueIds.set(ch.id, ch.key);
+      const lines = ch.lines.filter((l) => String(l.text || '').trim());
+      if (!lines.length) out.push({ key: ch.key, text: `${where} has no lines yet.` });
+      lines.forEach((l, i) => {
+        const n = i + 1;
+        if (!l.speaker) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: nobody says it.` });
+        else if (!can.has(l.speaker)) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: unknown character "${l.speaker}".` });
+        else if (!(ch.characters || []).includes(l.speaker)) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: ${l.speaker} isn't one of this dialogue's characters.` });
+      });
+      for (const e of ch.events || []) if (!events.has(e)) out.push({ key: ch.key, text: `${where} waits for the unknown event "${e}".` });
+      for (const k of ch.reads || []) {
+        if (k === ch.key) out.push({ key: ch.key, text: `${where} needs itself read first.` });
+        else if (!keys.has(k)) out.push({ key: ch.key, text: `${where} needs a dialogue that isn't in the book.` });
+      }
+      for (const k of ch.next || []) if (!keys.has(k)) out.push({ key: ch.key, text: `${where} leads to a dialogue that isn't in the book.` });
+    }
+    // line ids the writer (or the game) gave twice
+    const lineSeen = new Map();
+    for (const ch of model.chapters) {
+      for (const l of ch.lines) {
+        if (!l.id || !String(l.text || '').trim()) continue;
+        if (lineSeen.has(l.id) && lineSeen.get(l.id) !== ch.key) out.push({ key: ch.key, text: `${nameOf(ch.key)} and ${nameOf(lineSeen.get(l.id))} both have a line "${l.id}".` });
+        else lineSeen.set(l.id, ch.key);
+      }
+    }
+    const loop = findLoop(model.chapters);
+    if (loop) out.push({ key: loop[0], text: `The conversation loops: ${loop.map(nameOf).join(' → ')}.` });
+    return out;
+  }
+
+  // a run of "leads to" that comes back on itself, as chapter keys, or null
+  function findLoop(chapters) {
+    const byKey = new Map(chapters.map((c) => [c.key, c]));
+    const state = new Map();
+    const path = [];
+    const visit = (k) => {
+      if (state.get(k) === 1) return [...path.slice(path.indexOf(k)), k];
+      if (state.get(k) === 2 || !byKey.has(k)) return null;
+      state.set(k, 1);
+      path.push(k);
+      for (const n of byKey.get(k).next || []) {
+        const loop = visit(n);
+        if (loop) return loop;
+      }
+      path.pop();
+      state.set(k, 2);
+      return null;
+    };
+    for (const c of chapters) {
+      const loop = visit(c.key);
+      if (loop) return loop;
+    }
+    return null;
+  }
+
+  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop };
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.NeoDialogue = api;
+})(typeof window !== 'undefined' ? window : globalThis);

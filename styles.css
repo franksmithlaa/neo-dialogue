@@ -2365,3 +2365,74 @@ html:lang(ko) :is(#aux-paper h2, .pen-slot, .shelf-label, .shelf-bound-mark, .pt
   .side-cards-title, .side-card-head, .notes-part, .ns-label, #notes-up, #notes-outline b) {
   letter-spacing: 0.04em;
 }
+
+/* ========================= DIALOGUE BOOKS ========================= */
+/* A chapter is one dialogue (DIALOGUE BOOKS in app.js): its panel sits
+   under the heading, quiet until the pointer or the keys come to it, and
+   each line has its speaker's name in the margin. */
+.dlg-panel {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  font-size: 12.5px; color: #6c675d;
+  margin: -24px 0 28px; padding: 10px 12px 8px;
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent); border-radius: 6px;
+  opacity: 0.55; transition: opacity 0.15s;
+  user-select: none;
+}
+.dlg-panel:hover, .dlg-panel:focus-within { opacity: 1; }
+.dlg-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.dlg-label { flex: 0 0 88px; padding-top: 4px; text-transform: uppercase; letter-spacing: 1px; font-size: 10.5px; color: #8a857a; }
+.dlg-id, .dlg-multi input {
+  font: inherit; color: var(--ink); background: transparent;
+  border: none; border-bottom: 1px solid transparent; padding: 3px 2px; outline: none;
+}
+.dlg-id { font-family: ui-monospace, Menlo, Consolas, monospace; width: 22em; }
+.dlg-id:focus, .dlg-multi input:focus { border-bottom-color: var(--accent); }
+.dlg-multi { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; position: relative; }
+.dlg-multi input { flex: 1; min-width: 12em; }
+.dlg-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 4px 1px 8px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--ink);
+}
+.dlg-chip.event::before { content: '⚑ '; }
+.dlg-chip.event { background: color-mix(in srgb, #6a8ac9 22%, transparent); }
+.dlg-chip.missing { background: color-mix(in srgb, var(--red) 20%, transparent); }
+.dlg-chip button { border: none; background: none; color: inherit; cursor: pointer; opacity: 0.6; font-size: 13px; padding: 0 3px; }
+.dlg-chip button:hover { opacity: 1; }
+.dlg-menu {
+  position: absolute; top: 100%; left: 0; z-index: 30; min-width: 280px; max-height: 260px; overflow: auto;
+  background: var(--paper); border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18); padding: 4px 0;
+}
+.dlg-menu h4 { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #8a857a; padding: 6px 10px 2px; font-weight: 600; }
+.dlg-menu button { display: block; width: 100%; text-align: left; border: none; background: none; font: inherit; color: var(--ink); padding: 4px 10px; cursor: pointer; }
+.dlg-menu button.active, .dlg-menu button:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.dlg-menu button.create { color: #8a6d3b; }
+.dlg-menu .desc { display: block; font-size: 11px; color: #8a857a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dlg-foot { display: flex; align-items: flex-start; gap: 10px; margin-top: 4px; }
+.dlg-problems { flex: 1; list-style: none; color: var(--red); font-size: 12px; }
+.dlg-problems li::before { content: '• '; }
+.dlg-foot:has(.dlg-problems[hidden])::before { content: ''; flex: 1; }
+.dlg-linked {
+  font: inherit; border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 4px;
+  background: none; color: #8a6d3b; padding: 3px 10px; cursor: pointer;
+}
+.dlg-linked:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+/* lines: no indent (and no drop cap: app.js sets no-cap), a little air between speakers */
+.chapter-body.dialogue-body p { text-indent: 0; margin-bottom: 0.35em; position: relative; }
+.chapter-body.dialogue-body p::before {
+  content: attr(data-who);
+  position: absolute; right: calc(100% + 12px); top: 0.25em; width: calc(var(--page-pad-x) - 16px); text-align: right;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8a857a;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none;
+}
+.chapter-body.dialogue-body p:not([data-who])::before { content: '?'; color: var(--red); }
+#dlg-speaker {
+  position: fixed; z-index: 40; height: 24px;
+  font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+  color: #5a554b; background: var(--paper); border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 4px;
+}
+body.night .dlg-panel, body.night .dlg-label, body.night .chapter-body.dialogue-body p::before { color: #918b7d; }

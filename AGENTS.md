@@ -29,6 +29,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `spell-worker.js` | Hunspell WASM, forked with `utilityProcess`. Messages: `load`, `check`, `suggest`, `add` |
 | `backup-worker.js` | The day's backup zip, forked with `utilityProcess` by `dailyBackup` so a file that won't come off iCloud never holds the main process |
 | `spell-ro.js` | Romanian diacritics, used by the worker. Does not alter the manuscript |
+| `dialogue.js` | Dialogue books' model: ids, a book flattened into the game's one-line dialogues and back, the problems. `window.NeoDialogue`, also runs in Node |
 | `manuscript.js` | Standard manuscript format: the word count's rounding, the header's surname, the `.docx`'s parts and the PDF's page, from a model the window hands it. Plain JavaScript that also runs in Node (`window.NeoManuscript`, loaded by `index.html`) |
 | `locales/<code>.json` | One language. Regional files (`fr-CA.json`) hold only the strings that differ |
 | `pocket/` | Capacitor shell. It does not contain its own editor |
@@ -82,6 +83,16 @@ A book whose `book.json` says `"format": "screenplay"` is a script. Right-click 
 - A script's style lives in its `book.json`: `underlineHeadings: true` (Format → Underline Scene Headings) and `contd: false` ((CONT'D) turned off).
 - A script exports as a PDF (letter, printed with `print: 'screenplay'`), Fountain or Final Draft (`.fdx`). The book formats don't apply.
 - A `.fountain` or `.fdx` file dropped on a shelf or picked with Import becomes a new script. `importFile` in `main.js` only reads the file; `spFromFountain` and `spFromFdx` in `app.js` sort it into elements. Both readers are plain string functions, so the tests cover them (`scripts/fixtures/` holds a Final Draft file written by screenplain, an outside tool).
+
+## Dialogue books
+
+neo-dialogue's own feature: a book whose `book.json` says `"format": "dialogue"` is a game's dialogue, in the Blackest Smith Writer's story format (`data/story.json` and `data/text/<language>.json` in the game's repository). Right-click a shelf's + for New Dialogues. The DIALOGUE BOOKS section of `app.js` holds the screen; `dialogue.js` (`window.NeoDialogue`, plain JavaScript that also runs in Node) holds the model.
+
+- A chapter is one dialogue. `book.dialogue.chapters[<chapter id>]` keeps its dialogue `id` (lower case letters, digits, underscores), its `characters`, what it waits for (`events` that have happened, `reads`: chapters read first) and `next` (the chapters that follow; more than one is a choice). `book.dialogue.characters` (`{ id, name }`) and `book.dialogue.events` (`{ id, description }`) are the book's.
+- Each paragraph is a line. `data-speaker` on the `<p>` says who says it, picked from the menu in the margin beside the caret's line (`#dlg-speaker`), which offers the dialogue's characters first. `data-line` is the line's id in the game, given the first time it's written out; Enter drops it from the new half of a split line. `data-who` is the speaker's name in the margin, a screen mark `captureBody` strips.
+- The panel under each chapter's heading (`dlgPanel`) edits the dialogue; Create linked (`dlgCreateLinked`) adds the next dialogue straight after, with the same characters, this one read first and leading to it, and the next character's turn. Problems (`NeoDialogue.problems`) show in the panel as they arise.
+- The game's unit is a line. `flatten` writes a book out as one-line dialogues: a chapter's lines follow one another and each needs the one before read, the first carries the chapter's own preconditions (a dialogue read first stands for its last line), and the last leads to each next chapter's first line. `unflatten` puts the game's lines back into chapters, ending a chapter at any line something else waits for, so a story round-trips exactly.
+- `scripts/dialogue.test.js` (the model, `npm test`) and `scripts/dialogue.e2e.js` (`npm run test:dialogue`). Pocket doesn't load `dialogue.js`: a dialogue book opens there as an ordinary book and keeps its tags.
 
 ## Manuscript format
 

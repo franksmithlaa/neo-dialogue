@@ -95,6 +95,11 @@ function kindCount(chId, kind, meta = book) {
 const chapterNumber = (chId, meta = book) => kindCount(chId, 'chapter', meta);
 function chapterName(chId, meta = book) {
   const k = chapterKind(chId, meta);
+  // a dialogue book's chapter goes by its dialogue id
+  if (k === 'chapter' && meta && meta.format === 'dialogue') {
+    const d = meta.dialogue && meta.dialogue.chapters && meta.dialogue.chapters[chId];
+    return (d && d.id) || t('Dialogue {n}', { n: chapterNumber(chId, meta) });
+  }
   if (k === 'chapter') return t('Chapter {n}', { n: chapterNumber(chId, meta) });
   if (k === 'part') return partLabel(kindCount(chId, 'part', meta));
   // an unnumbered chapter is its title
@@ -1136,13 +1141,15 @@ async function renderShelves() {
     if (!isBound(shelf)) {
       blank.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
-        if (!moreOn()) return; // scripts are behind Show More Features
+        // scripts are behind Show More Features; dialogues are always offered
         const pick = await popMenu(e.clientX, e.clientY, [
           { label: t('New Book'), value: 'book' },
-          { label: t('New Script'), value: 'script' }
+          ...(moreOn() ? [{ label: t('New Script'), value: 'script' }] : []),
+          { label: t('New Dialogues'), value: 'dialogue' }
         ], { from: blank });
         if (pick === 'book') createBookOnShelf(shelf);
         else if (pick === 'script') createScriptOnShelf(shelf);
+        else if (pick === 'dialogue') createDialogueOnShelf(shelf);
       });
     }
 
@@ -2680,6 +2687,8 @@ function renderChapters() {
     if (isScript()) body.classList.add('script-body', $('#paper').classList.contains('narrow') ? 'sp-narrow' : 'sp-geom', 'no-cap');
     body.innerHTML = chapterHTML[chId] || '<p><br></p>';
     markDialogueOpening(body);
+    // a dialogue book's chapter: its panel above the lines, a speaker on each
+    if (isDialogue() && story) { dlgPanel(sec, chId); wireDialogueBody(body, chId); }
     if (PAGE_PROMPTS[kind]) {
       body.dataset.ph = PAGE_PROMPTS[kind]();
       const blank = () => body.classList.toggle('blank', !body.textContent.trim());
@@ -2722,6 +2731,7 @@ function renderChapters() {
     spRepaginate();
     if (document.fonts) document.fonts.load('1em "Courier Prime"').then(() => spSchedule(0)).catch(() => {});
   }
+  if (isDialogue()) dlgShowProblems();
   applyPaged();
   renderAllFootnoteLists();
   renderNav();
@@ -4186,7 +4196,7 @@ function captureBody(body) {
   // (a page marks the lines that say who said it, and a chapter the speech
   // after a scene break, for the screen only)
   // (and a script's page breaks, (CONT'D) and suggestions)
-  return dropJunkSpans(body.innerHTML).replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk|fnopen)=""/g, '')
+  return dropJunkSpans(body.innerHTML).replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk|fnopen)=""/g, '').replace(/ data-who="[^"]*"/g, '')
     .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste|scene-note)(?:="[^"]*")?/g, ''));
 }
 
@@ -7186,6 +7196,464 @@ function scriptTile(el, meta) {
   tEl.textContent = title;
   tEl.classList.toggle('long', title.length > 36);
   el.querySelector('.st-author').textContent = meta.author || '';
+}
+
+/* ================================================================== */
+/*  DIALOGUE BOOKS                                                     */
+/*  A book whose book.json says "format": "dialogue" is a game's       */
+/*  dialogue (the Blackest Smith Writer's story). Each chapter is one  */
+/*  dialogue: the characters in it, what it waits for (story events,   */
+/*  dialogues read first) and the dialogues that come next. Each line  */
+/*  is a paragraph, said by one of its characters (data-speaker on the */
+/*  <p>, picked in the margin) and named in the game by data-line once */
+/*  it has been written out. book.dialogue holds the characters, the   */
+/*  events and each chapter's settings; dialogue.js turns the book     */
+/*  into the game's one-line dialogues and back. Right-click a shelf's */
+/*  + for New Dialogues.                                               */
+/* ================================================================== */
+const isDialogue = (meta = book) => !!meta && meta.format === 'dialogue' && !!window.NeoDialogue;
+const DLG = () => window.NeoDialogue;
+
+// the book's characters, events and chapter settings, made whole
+function dlgMeta() {
+  const d = book.dialogue = book.dialogue || {};
+  d.characters = d.characters || [];
+  d.events = d.events || [];
+  d.chapters = d.chapters || {};
+  return d;
+}
+function dlgUsedIds(except) {
+  return new Set(Object.entries(dlgMeta().chapters).filter(([k]) => k !== except && book.chapterOrder.includes(k)).map(([, c]) => c.id));
+}
+function dlgChapter(chId) {
+  const d = dlgMeta();
+  if (!d.chapters[chId]) {
+    d.chapters[chId] = { id: DLG().nextId('dialogue', dlgUsedIds(chId)), idAuto: true, characters: [], events: [], reads: [], next: [] };
+    scheduleMetaSave();
+  }
+  const c = d.chapters[chId];
+  for (const k of ['characters', 'events', 'reads', 'next']) c[k] = c[k] || [];
+  return c;
+}
+const dlgCharName = (id) => (dlgMeta().characters.find((c) => c.id === id) || {}).name || id;
+const dlgLabel = (chId) => (book.dialogue && book.dialogue.chapters && book.dialogue.chapters[chId] && book.dialogue.chapters[chId].id) || t('Dialogue');
+
+// A chapter's lines, from its saved HTML: each paragraph's words, speaker
+// and game id
+function dlgLines(chId) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = chapterHTML[chId] || '';
+  return [...tpl.content.querySelectorAll('p')]
+    .filter((p) => !p.classList.contains('scene-break') && !p.classList.contains('ghost'))
+    .map((p) => ({ id: p.getAttribute('data-line') || '', speaker: p.getAttribute('data-speaker') || '', text: p.textContent }));
+}
+// the whole book as dialogue.js takes it
+function dlgModel() {
+  const d = dlgMeta();
+  return {
+    characters: d.characters,
+    events: d.events,
+    chapters: book.chapterOrder.filter((chId) => isStory(chId)).map((chId) => {
+      const c = dlgChapter(chId);
+      return { key: chId, id: c.id, characters: c.characters, events: c.events, reads: c.reads, next: c.next, lines: dlgLines(chId) };
+    })
+  };
+}
+function dlgProblems() {
+  return DLG().problems(dlgModel(), [], dlgLabel);
+}
+
+function dlgChanged(chId) {
+  scheduleMetaSave();
+  renderNav();
+  dlgRefresh(chId);
+}
+// every panel's problems again, and this chapter's panel (or all) drawn anew
+function dlgRefresh(chId) {
+  for (const sec of document.querySelectorAll('#chapters .chapter')) {
+    if (!chId || sec.dataset.id === chId) dlgPanel(sec, sec.dataset.id);
+  }
+  dlgShowProblems();
+}
+let dlgProblemTimer = null;
+function dlgShowProblemsSoon() {
+  clearTimeout(dlgProblemTimer);
+  dlgProblemTimer = setTimeout(dlgShowProblems, 400);
+}
+function dlgShowProblems() {
+  if (!book || !isDialogue()) return;
+  const all = dlgProblems();
+  for (const sec of document.querySelectorAll('#chapters .chapter')) {
+    const list = sec.querySelector('.dlg-problems');
+    if (!list) continue;
+    const mine = all.filter((p) => p.key === sec.dataset.id);
+    list.replaceChildren(...mine.map((p) => Object.assign(document.createElement('li'), { textContent: p.text })));
+    list.hidden = !mine.length;
+  }
+  dlgSpeakerLabels();
+}
+
+// The panel above a chapter's lines: its id, characters, what it waits for
+// and where it leads
+function dlgPanel(sec, chId) {
+  if (!isStory(chId)) return;
+  const c = dlgChapter(chId);
+  const old = sec.querySelector('.dlg-panel');
+  const panel = document.createElement('div');
+  panel.className = 'dlg-panel';
+  panel.contentEditable = 'false';
+  // the panel's own keys stay out of the editor's
+  panel.addEventListener('keydown', (e) => e.stopPropagation());
+
+  const row = (label, el, hint) => {
+    const r = document.createElement('div');
+    r.className = 'dlg-row';
+    const l = document.createElement('span');
+    l.className = 'dlg-label';
+    l.textContent = label;
+    if (hint) l.title = hint;
+    r.append(l, el);
+    panel.appendChild(r);
+    return r;
+  };
+
+  const idInput = document.createElement('input');
+  idInput.className = 'dlg-id';
+  idInput.spellcheck = false;
+  idInput.value = c.id;
+  idInput.title = t('Lower case letters, digits and underscores. Its lines are named after it: {id}_01, {id}_02…', { id: c.id });
+  idInput.addEventListener('input', () => {
+    const v = DLG().slug(idInput.value);
+    if (!v) return;
+    c.id = v;
+    c.idAuto = false;
+    scheduleMetaSave();
+    renderNav();
+    dlgShowProblemsSoon();
+  });
+  idInput.addEventListener('change', () => { idInput.value = c.id; renderNav(); });
+  row(t('Dialogue ID'), idInput);
+
+  row(t('Characters'), dlgMulti({
+    placeholder: t('Add a character…'),
+    options: () => dlgMeta().characters.map((ch) => ({ value: ch.id, label: ch.name, desc: ch.id })),
+    selected: () => c.characters,
+    set: (v) => {
+      const firstOne = !c.characters.length && v.length;
+      c.characters = v;
+      // a dialogue nobody has named yet is named after who speaks first
+      if (firstOne && c.idAuto) c.id = DLG().nextId(v[0], dlgUsedIds(chId));
+      dlgChanged(chId);
+    },
+    create: { label: t('+ New character'), run: (name) => dlgNewCharacter(name, chId) }
+  }), t('Who is in this dialogue. Each line is said by one of them.'));
+
+  row(t('Needs'), dlgMulti({
+    placeholder: t('Add an event or a dialogue read first…'),
+    options: () => [
+      ...dlgMeta().events.map((e) => ({ group: t('Events'), value: 'event:' + e.id, label: e.id, desc: e.description, event: true })),
+      ...book.chapterOrder.filter((k) => k !== chId && isStory(k)).map((k) => ({ group: t('Dialogues read'), value: 'read:' + k, label: dlgLabel(k), desc: dlgSnippet(k) }))
+    ],
+    selected: () => [...c.events.map((e) => 'event:' + e), ...c.reads.map((k) => 'read:' + k)],
+    set: (v) => {
+      c.events = v.filter((x) => x.startsWith('event:')).map((x) => x.slice(6));
+      c.reads = v.filter((x) => x.startsWith('read:')).map((x) => x.slice(5));
+      dlgChanged(chId);
+    },
+    create: { label: t('+ New event'), run: (text) => dlgNewEvent(text, chId) }
+  }), t('Story events that must have happened, and dialogues that must have been read, before this one can start.'));
+
+  row(t('Leads to'), dlgMulti({
+    placeholder: t('Add a dialogue that comes next…'),
+    options: () => book.chapterOrder.filter((k) => k !== chId && isStory(k)).map((k) => ({ value: k, label: dlgLabel(k), desc: dlgSnippet(k) })),
+    selected: () => c.next,
+    set: (v) => { c.next = v; dlgChanged(chId); }
+  }), t('The dialogues that follow this one in the same conversation. More than one is a choice.'));
+
+  const foot = document.createElement('div');
+  foot.className = 'dlg-foot';
+  const linked = document.createElement('button');
+  linked.type = 'button';
+  linked.className = 'dlg-linked';
+  linked.textContent = t('Create linked');
+  linked.title = t('A new dialogue straight after this one: the same characters, this one read first, and this one leading to it');
+  linked.onclick = () => dlgCreateLinked(chId);
+  const problems = document.createElement('ul');
+  problems.className = 'dlg-problems';
+  problems.hidden = true;
+  foot.append(problems, linked);
+  panel.appendChild(foot);
+
+  if (old) old.replaceWith(panel);
+  else sec.querySelector('.chapter-head').after(panel);
+}
+
+function dlgSnippet(chId) {
+  const first = dlgLines(chId).find((l) => l.text.trim());
+  if (!first) return '';
+  const s = (first.speaker ? dlgCharName(first.speaker) + ': ' : '') + first.text.trim();
+  return s.length > 60 ? s.slice(0, 59) + '…' : s;
+}
+
+async function dlgNewCharacter(typed, chId) {
+  const name = typed || await askInput(t('New character'), t('Name'));
+  if (!name) return;
+  const d = dlgMeta();
+  let id = DLG().slug(name);
+  if (!id) return;
+  const known = d.characters.find((ch) => ch.id === id || ch.name.toLowerCase() === name.toLowerCase());
+  if (known) id = known.id;
+  else d.characters.push({ id, name });
+  const c = dlgChapter(chId);
+  if (!c.characters.includes(id)) {
+    if (!c.characters.length && c.idAuto) c.id = DLG().nextId(id, dlgUsedIds(chId));
+    c.characters.push(id);
+  }
+  dlgChanged(chId);
+}
+async function dlgNewEvent(typed, chId) {
+  const id = DLG().slug(typed || await askInput(t('New story event'), t('event_id')));
+  if (!id) return;
+  const d = dlgMeta();
+  if (!d.events.some((e) => e.id === id)) {
+    const description = await askInput(t('What happened?'), t('A lockable chest stands in the room.'));
+    if (description === null) return;
+    d.events.push({ id, description });
+  }
+  const c = dlgChapter(chId);
+  if (!c.events.includes(id)) c.events.push(id);
+  dlgChanged(chId);
+}
+
+// Create linked: the next dialogue of the conversation, straight after
+// this one, with the same characters and the last speaker's turn over
+function dlgCreateLinked(chId) {
+  snapshotStructure('chapter add');
+  const c = dlgChapter(chId);
+  const idx = book.chapterOrder.indexOf(chId) + 1;
+  const used = dlgUsedIds();
+  const id = DLG().idAfter(c.id, used);
+  const lines = dlgLines(chId).filter((l) => l.text.trim());
+  const lastSpeaker = lines.length ? lines.at(-1).speaker : '';
+  // the one who answers: the next of the characters after the last to speak
+  const turn = c.characters.length > 1 && lastSpeaker ? c.characters[(c.characters.indexOf(lastSpeaker) + 1) % c.characters.length] : (c.characters[0] || '');
+  const newId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  dlgMeta().chapters[newId] = { id, idAuto: false, characters: [...c.characters], events: [], reads: [chId], next: [] };
+  c.next = [...c.next, newId];
+  book.chapterOrder.splice(idx, 0, newId);
+  chapterHTML[newId] = turn ? `<p data-speaker="${turn}"><br></p>` : '<p><br></p>';
+  persistChapter(newId);
+  saveMeta();
+  renderChapters();
+  focusChapter(newId);
+}
+
+// Chips for what's chosen, and a box that filters the rest; Enter or a
+// click adds one. create: a last item that makes a new one from the words
+// typed.
+function dlgMulti({ placeholder, options, selected, set, create }) {
+  const root = document.createElement('div');
+  root.className = 'dlg-multi';
+  const input = document.createElement('input');
+  input.placeholder = placeholder;
+  input.setAttribute('aria-label', placeholder);
+  input.spellcheck = false;
+  const menu = document.createElement('div');
+  menu.className = 'dlg-menu';
+  menu.hidden = true;
+  let active = 0;
+  const matches = () => {
+    const q = input.value.trim().toLowerCase();
+    const list = options().filter((o) => !selected().includes(o.value) && (!q || o.label.toLowerCase().includes(q) || (o.desc || '').toLowerCase().includes(q)));
+    if (create) list.push({ value: null, label: create.label + (input.value.trim() ? ': ' + input.value.trim() : ''), create: true });
+    return list;
+  };
+  const pick = (o) => {
+    if (o.create) { const typed = input.value.trim(); input.value = ''; menu.hidden = true; create.run(typed); return; }
+    set([...selected(), o.value]);
+  };
+  const drawMenu = () => {
+    const list = matches();
+    active = Math.min(active, Math.max(0, list.length - 1));
+    menu.replaceChildren();
+    let group = null;
+    list.forEach((o, i) => {
+      if (o.group && o.group !== group) {
+        group = o.group;
+        menu.appendChild(Object.assign(document.createElement('h4'), { textContent: group }));
+      }
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = (i === active ? 'active' : '') + (o.create ? ' create' : '');
+      b.textContent = o.label;
+      if (o.desc) b.appendChild(Object.assign(document.createElement('span'), { className: 'desc', textContent: o.desc }));
+      b.addEventListener('mousedown', (e) => { e.preventDefault(); pick(o); });
+      menu.appendChild(b);
+    });
+  };
+  const draw = () => {
+    const chips = selected().map((v) => {
+      const o = options().find((x) => x.value === v);
+      const chip = document.createElement('span');
+      chip.className = 'dlg-chip' + (String(v).startsWith('event:') ? ' event' : '') + (o ? '' : ' missing');
+      chip.textContent = o ? o.label : t('(gone)');
+      if (o && o.desc) chip.title = o.desc;
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.setAttribute('aria-label', t('Remove {name}', { name: chip.textContent }));
+      x.onclick = () => set(selected().filter((s) => s !== v));
+      chip.appendChild(x);
+      return chip;
+    });
+    root.replaceChildren(...chips, input, menu);
+  };
+  input.addEventListener('focus', () => { menu.hidden = false; drawMenu(); });
+  input.addEventListener('blur', () => { menu.hidden = true; });
+  input.addEventListener('input', () => { active = 0; menu.hidden = false; drawMenu(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    const list = matches();
+    if (e.key === 'ArrowDown') { active = Math.min(active + 1, list.length - 1); drawMenu(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { active = Math.max(active - 1, 0); drawMenu(); e.preventDefault(); }
+    else if (e.key === 'Enter' && list[active]) { e.preventDefault(); pick(list[active]); }
+    else if (e.key === 'Escape') input.blur();
+    else if (e.key === 'Backspace' && !input.value && selected().length) set(selected().slice(0, -1));
+  });
+  draw();
+  return root;
+}
+
+// ---- who says each line: a menu in the margin beside the caret's line ----
+const DLG_SPEAKER = document.createElement('select');
+DLG_SPEAKER.id = 'dlg-speaker';
+DLG_SPEAKER.hidden = true;
+DLG_SPEAKER.setAttribute('aria-label', t('Who says this line'));
+document.body.appendChild(DLG_SPEAKER);
+let dlgSpeakerPara = null;
+
+function dlgCaretPara() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  let el = sel.anchorNode;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  const p = el && el.closest ? el.closest('p') : null;
+  return p && p.parentElement && p.parentElement.classList.contains('dialogue-body') ? p : null;
+}
+function dlgPlaceSpeaker() {
+  const p = book && isDialogue() && currentTab === 'manuscript' && !$('#editor-view').hidden ? dlgCaretPara() : null;
+  if (!p) {
+    // the menu keeps its line while it's being used
+    if (document.activeElement !== DLG_SPEAKER) { DLG_SPEAKER.hidden = true; dlgSpeakerPara = null; }
+    return;
+  }
+  const chId = p.closest('.chapter').dataset.id;
+  const c = dlgChapter(chId);
+  if (p !== dlgSpeakerPara || DLG_SPEAKER.dataset.chapter !== chId) {
+    dlgSpeakerPara = p;
+    DLG_SPEAKER.dataset.chapter = chId;
+    const opts = [new Option(t('Who says this?'), '')];
+    for (const id of c.characters) opts.push(new Option(dlgCharName(id), id));
+    const others = dlgMeta().characters.filter((ch) => !c.characters.includes(ch.id));
+    if (others.length) {
+      const g = document.createElement('optgroup');
+      g.label = t('Add to this dialogue');
+      for (const ch of others) g.appendChild(new Option(ch.name, ch.id));
+      opts.push(g);
+    }
+    opts.push(new Option(t('New character…'), '+new'));
+    DLG_SPEAKER.replaceChildren(...opts);
+  }
+  DLG_SPEAKER.value = p.getAttribute('data-speaker') || '';
+  const r = p.getBoundingClientRect();
+  // right of it the line, left of it as much room as a name needs (past
+  // the page's edge if the margin is narrow)
+  const w = 110;
+  DLG_SPEAKER.style.top = Math.round(r.top) + 'px';
+  DLG_SPEAKER.style.left = Math.round(Math.max(4, r.left - w - 8)) + 'px';
+  DLG_SPEAKER.style.width = w + 'px';
+  DLG_SPEAKER.hidden = false;
+}
+DLG_SPEAKER.addEventListener('mousedown', (e) => e.stopPropagation());
+DLG_SPEAKER.addEventListener('change', async () => {
+  const p = dlgSpeakerPara;
+  if (!p || !p.isConnected) return;
+  const sec = p.closest('.chapter');
+  const chId = sec.dataset.id;
+  const body = sec.querySelector('.chapter-body');
+  let id = DLG_SPEAKER.value;
+  if (id === '+new') {
+    const before = new Set(dlgChapter(chId).characters);
+    await dlgNewCharacter('', chId);
+    id = dlgChapter(chId).characters.find((x) => !before.has(x)) || p.getAttribute('data-speaker') || '';
+  }
+  const c = dlgChapter(chId);
+  if (id && !c.characters.includes(id)) { c.characters.push(id); dlgChanged(chId); }
+  if (id) p.setAttribute('data-speaker', id);
+  else p.removeAttribute('data-speaker');
+  syncChapter(body, chId);
+  dlgSpeakerPara = null;
+  dlgShowProblems();
+  // back to the line, the caret where it was
+  body.focus();
+  const range = document.createRange();
+  range.selectNodeContents(p);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  dlgPlaceSpeaker();
+});
+document.addEventListener('selectionchange', dlgPlaceSpeaker);
+window.addEventListener('resize', dlgPlaceSpeaker);
+$('#paper-scroll').addEventListener('scroll', () => { if (!DLG_SPEAKER.hidden) dlgPlaceSpeaker(); }, { passive: true });
+
+// The speaker's name on every line, in the margin (a screen mark, stripped
+// from the file by captureBody)
+function dlgSpeakerLabels() {
+  for (const p of document.querySelectorAll('.dialogue-body > p')) {
+    const id = p.getAttribute('data-speaker');
+    const name = id ? dlgCharName(id) : '';
+    if (p.getAttribute('data-who') !== name) {
+      if (name) p.setAttribute('data-who', name);
+      else p.removeAttribute('data-who');
+    }
+  }
+}
+
+// a chapter of a dialogue book, as it opens
+function wireDialogueBody(body, chId) {
+  body.classList.add('dialogue-body', 'no-cap');
+  body.addEventListener('input', (e) => {
+    // Enter carries the line's id into both halves: the new line lets go of it
+    if (e.inputType === 'insertParagraph') {
+      const p = dlgCaretPara();
+      const prev = p && p.previousElementSibling;
+      if (p && prev && p.hasAttribute('data-line') && prev.getAttribute('data-line') === p.getAttribute('data-line')) {
+        p.removeAttribute('data-line');
+        syncChapter(body, chId);
+      }
+    }
+    dlgShowProblemsSoon();
+  });
+}
+
+async function createDialogueOnShelf(shelf) {
+  const meta = await window.neo.createBook({ author: displayAuthor() });
+  const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  await window.neo.writeChapter(meta.id, chId, '<p><br></p>');
+  meta.format = 'dialogue';
+  meta.chapterOrder = [chId];
+  meta.dialogue = {
+    characters: [],
+    events: [],
+    chapters: { [chId]: { id: 'dialogue_01', idAuto: true, characters: [], events: [], reads: [], next: [] } }
+  };
+  meta.tabNames = { notes: (library.tabDefaults && library.tabDefaults.notes) || 'Notes', outline: 'Outline' };
+  await writeBookMeta(meta.id, meta);
+  await placeTitle(shelf, meta.id);
+  await writeLibrary(library);
+  await openBook(meta.id);
 }
 
 /* ================================================================== */
