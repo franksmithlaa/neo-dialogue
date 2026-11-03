@@ -7444,7 +7444,7 @@ function dlgCreateLinked(chId) {
   const idx = book.chapterOrder.indexOf(chId) + 1;
   const used = dlgUsedIds();
   const id = DLG().idAfter(c.id, used);
-  const lines = dlgLines(chId).filter((l) => l.text.trim());
+  const lines = dlgLines(chId).filter(DLG().isLine);
   const lastSpeaker = lines.length ? lines.at(-1).speaker : '';
   // the one who answers: the next of the characters after the last to speak
   const turn = c.characters.length > 1 && lastSpeaker ? c.characters[(c.characters.indexOf(lastSpeaker) + 1) % c.characters.length] : (c.characters[0] || '');
@@ -7668,11 +7668,13 @@ async function dlgReadGame() {
   dlgMeta().languages = r.languages;
   return { story: read.story, text: read.text };
 }
+// one for each language, since each has its own text file
+const dlgBaseName = () => 'story-base-' + ((dlgSource() && dlgSource().language) || 'en');
 async function dlgBase() {
-  const b = await window.neo.readJSON(book.id, 'story-base', null);
+  const b = await window.neo.readJSON(book.id, dlgBaseName(), null);
   return b && b.story ? b : DLG_EMPTY;
 }
-const dlgSetBase = (side) => window.neo.writeJSON(book.id, 'story-base', { story: side.story, text: side.text });
+const dlgSetBase = (side) => window.neo.writeJSON(book.id, dlgBaseName(), { story: side.story, text: side.text });
 
 // The book as the game's story, the ids the new lines get written into the
 // chapters first, so the lines keep them
@@ -7711,7 +7713,7 @@ async function dlgRebuild(story, text) {
   const firstLine = new Map();
   const lineOwner = new Map();
   for (const chId of book.chapterOrder.filter((c) => isStory(c))) {
-    const ls = dlgLines(chId).filter((l) => l.text.trim());
+    const ls = dlgLines(chId).filter(DLG().isLine);
     if (ls[0] && ls[0].id) firstLine.set(ls[0].id, chId);
     for (const l of ls) if (l.id) lineOwner.set(l.id, chId);
   }
@@ -7739,7 +7741,7 @@ async function dlgRebuild(story, text) {
       reads: ch.reads.map(K),
       next: ch.next.map(K)
     };
-    const now = dlgLines(chId).filter((l) => l.text.trim()).map((l) => ({ id: l.id, speaker: l.speaker, text: l.text.trim() }));
+    const now = dlgLines(chId).filter(DLG().isLine).map((l) => ({ id: l.id, speaker: l.speaker, text: l.text.trim() }));
     if (!book.chapterOrder.includes(chId)) {
       const firstStory = book.chapterOrder.findIndex((c) => isStory(c));
       const at = prev ? book.chapterOrder.indexOf(prev) + 1 : (firstStory < 0 ? book.chapterOrder.length : firstStory);
@@ -7751,7 +7753,7 @@ async function dlgRebuild(story, text) {
     }
     prev = chId;
   }
-  const gone = book.chapterOrder.filter((chId) => isStory(chId) && !kept.has(chId) && dlgLines(chId).some((l) => l.text.trim() && l.id));
+  const gone = book.chapterOrder.filter((chId) => isStory(chId) && !kept.has(chId) && dlgLines(chId).some((l) => l.id && DLG().isLine(l)));
   for (const chId of gone) await deleteChapterToDarlings(chId, true);
   if (blank) for (const chId of book.chapterOrder.filter((c) => isStory(c) && !kept.has(c))) await deleteChapterQuiet(chId);
   await saveMeta();
@@ -7878,6 +7880,27 @@ function dlgBar() {
     const save = btn(t('Save to Game'), all.length ? t('Fix the problems listed first.') : t('Write the book into data/story.json and data/text/{lang}.json', { lang: src.language || 'en' }), dlgSaveToGame);
     save.disabled = dlgBusy || all.length > 0;
     row.appendChild(save);
+    const push = btn(t('Push to {base}', { base: dlgGitBase() }), all.length ? t('Fix the problems listed first.') : t('Into git, so you don’t have to: pull {base}, commit on a story/ branch, merge it into {base} and push', { base: dlgGitBase() }), dlgPush);
+    push.disabled = dlgBusy || all.length > 0;
+    row.appendChild(push);
+    const langs = uniqIds([...(dlgMeta().languages || []), src.language || 'en']).sort();
+    const pickLang = document.createElement('select');
+    pickLang.className = 'dlg-lang';
+    pickLang.setAttribute('aria-label', t('Language'));
+    pickLang.title = t('The language of the book’s words (data/text/<language>.json)');
+    for (const l of langs) pickLang.appendChild(new Option(l, l));
+    pickLang.appendChild(new Option(t('New language…'), '+new'));
+    pickLang.value = src.language || 'en';
+    pickLang.disabled = dlgBusy;
+    pickLang.onchange = async () => {
+      let l = pickLang.value;
+      if (l === '+new') {
+        l = ((await askInput(t('New language'), t('Its code, as the text file is named: fr, de, pt-BR…'))) || '').trim();
+        if (!/^[a-z0-9_-]+$/i.test(l)) { dlgBar(); return; }
+      }
+      dlgSwitchLanguage(l);
+    };
+    row.appendChild(pickLang);
   }
   bar.appendChild(row);
   if (all.length) {
@@ -7885,6 +7908,174 @@ function dlgBar() {
     p.className = 'dlg-count';
     p.textContent = all.length === 1 ? t('1 problem to fix before saving') : t('{n} problems to fix before saving', { n: all.length });
     bar.appendChild(p);
+  }
+}
+
+// ---- Push: the book into the game's dev branch, the Writer's way ----
+// Checks the story files have no changes outside git (the book's own Save
+// to Game aside, which it still holds), checks out dev and pulls, merges
+// the book onto that story, and hands main.js the files to commit on
+// story/<first dialogue changed>, push, merge into dev and push.
+const dlgGitBase = () => (dlgSource() && dlgSource().base) || 'dev';
+const dlgGitRemote = () => (dlgSource() && dlgSource().remote) || 'origin';
+function dlgStepsModal(title, message, steps) {
+  const bd = document.createElement('div');
+  bd.className = 'modal-backdrop';
+  const modal = document.createElement('div');
+  modal.className = 'modal dlg-push';
+  modal.style.width = '560px';
+  const h = document.createElement('h2');
+  h.style.fontSize = '16px';
+  h.textContent = title;
+  const p = document.createElement('p');
+  p.style.whiteSpace = 'pre-wrap';
+  p.textContent = message;
+  modal.append(h, p);
+  if (steps && steps.length) {
+    const det = document.createElement('details');
+    det.open = !!steps.some((s) => !s.ok);
+    det.appendChild(Object.assign(document.createElement('summary'), { textContent: t('What git did') }));
+    const ol = document.createElement('ol');
+    for (const s of steps) {
+      const li = document.createElement('li');
+      li.className = s.ok ? 'ok' : 'fail';
+      li.textContent = s.command;
+      if (s.output) li.appendChild(Object.assign(document.createElement('pre'), { textContent: s.output }));
+      ol.appendChild(li);
+    }
+    det.appendChild(ol);
+    modal.appendChild(det);
+  }
+  const row = document.createElement('div');
+  row.style.cssText = 'text-align:right;margin-top:14px';
+  const ok = document.createElement('button');
+  ok.className = 'btn-gold';
+  ok.textContent = t('Close');
+  row.appendChild(ok);
+  modal.appendChild(row);
+  bd.appendChild(modal);
+  document.body.appendChild(bd);
+  const done = () => bd.remove();
+  ok.onclick = done;
+  bd.addEventListener('keydown', (e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.stopPropagation(); done(); } });
+  ok.focus();
+  return bd;
+}
+// the dialogues one story has that another doesn't, or has otherwise
+function dlgChangedIds(a, b) {
+  const B = new Map(b.story.dialogues.map((d) => [d.id, d]));
+  return a.story.dialogues.filter((d) => JSON.stringify(d) !== JSON.stringify(B.get(d.id)) || a.text[d.id] !== b.text[d.id]).map((d) => d.id);
+}
+const dlgSameSide = (a, b) => JSON.stringify(a.story) === JSON.stringify(b.story) && JSON.stringify(a.text) === JSON.stringify(b.text);
+
+async function dlgPush() {
+  if (dlgBusy || !dlgSource()) return;
+  const problems = dlgProblems();
+  if (problems.length) { toast(t('Fix the problems first: {first}', { first: problems[0].text }), 7000); return; }
+  const src = dlgSource();
+  const lang = src.language || 'en';
+  const base = dlgGitBase();
+  dlgBusy = true;
+  dlgBar();
+  const working = dlgStepsModal(t('Pushing…'), t('Putting the book into {base}. This takes a few seconds.', { base }), []);
+  let steps = [];
+  try {
+    flushAllSaves();
+    const look = await window.neo.storyGitLook(src.repo, lang);
+    if (look.error) throw new Error(look.error);
+    const B = await dlgBase();
+    let discard = false;
+    if (look.dirty) {
+      // the book's own Save to Game is the only change git may find
+      const mine = look.now.story === DLG().storyToJson(B.story) && look.now.text === DLG().textToJson(B.story, B.text);
+      if (!mine) throw new Error(t('The story files have changes that aren’t in git yet ({files}). Ask a developer to commit or undo them first.', { files: look.dirty.replace(/\s+/g, ' ') }));
+      discard = true;
+    }
+    // what the book and the game last agreed on: the last commit, if the
+    // book's own save is put back; else what the book last read or wrote
+    let mergeBase = B;
+    if (discard && look.head.story !== null) {
+      const h = DLG().readStory(look.head.story, look.head.text);
+      mergeBase = { story: h.story, text: h.text };
+    }
+    const ours = dlgOurs();
+    const pulled = await window.neo.storyGitPull(src.repo, lang, base, dlgGitRemote(), discard);
+    steps = pulled.steps || [];
+    if (pulled.error) throw new Error(pulled.error);
+    const read = DLG().readStory(pulled.story, pulled.text, `text/${lang}.json`);
+    if (read.errors.length) throw new Error(read.errors.join('\n'));
+    const theirs = { story: read.story, text: read.text };
+    const m = DLG().merge(mergeBase, ours, theirs);
+    if (!dlgSameSide(m, ours)) {
+      snapshotStructure('update from game');
+      await dlgRebuild(m.story, m.text);
+    }
+    const again = dlgProblems();
+    if (again.length) {
+      await dlgSetBase(theirs);
+      throw new Error(t('{base} has changed and the book now has it. Fix the problems first: {first}', { base, first: again[0].text }));
+    }
+    const ids = dlgChangedIds(m, theirs);
+    const lost = theirs.story.dialogues.filter((d) => !m.story.dialogues.some((x) => x.id === d.id)).map((d) => d.id);
+    if (!ids.length && !lost.length && dlgSameSide({ story: { ...m.story, dialogues: [] }, text: {} }, { story: { ...theirs.story, dialogues: [] }, text: {} })) {
+      await dlgSetBase(theirs);
+      working.remove();
+      dlgStepsModal(t('Nothing to push'), t('{base} already has everything in the book.', { base }), steps);
+      return;
+    }
+    const name = ids[0] || lost[0] || DLG().slug(src.language + '_story');
+    const r = await window.neo.storyGitPush(src.repo, lang, base, dlgGitRemote(), name, [...ids, ...lost], DLG().storyToJson(m.story), DLG().textToJson(m.story, m.text));
+    steps = steps.concat(r.steps || []);
+    working.remove();
+    if (r.ok) {
+      await dlgSetBase(m);
+      dlgStepsModal(t('Pushed'), t('Pushed to {base} as {branch}. The dialogue is part of the game now.', { base, branch: r.branch }), steps);
+    } else {
+      await dlgSetBase(theirs);
+      dlgStepsModal(t('Not pushed'), r.error, steps);
+    }
+  } catch (err) {
+    working.remove();
+    dlgStepsModal(t('Not pushed'), String(err.message || err), steps);
+  } finally {
+    dlgBusy = false;
+    dlgBar();
+  }
+}
+
+// ---- the language the book's words are in ----
+// The lines are the same in every language; only their words differ. The
+// book holds one language at a time: another is read in over it, a line
+// with no words there yet stays as an empty line to translate.
+async function dlgSwitchLanguage(lang) {
+  const src = dlgSource();
+  if (!src || lang === (src.language || 'en')) return;
+  const B = await dlgBase();
+  if (!dlgSameSide(dlgOurs(), B)) {
+    toast(t('The book has words not in the game yet. Save to Game or Push first, then change the language.'), 7000);
+    dlgBar();
+    return;
+  }
+  const was = src.language || 'en';
+  src.language = lang;
+  dlgBusy = true;
+  try {
+    // the book's words are all in the game: the other language's simply
+    // take their place (no merge, which would take them for edits)
+    const theirs = await dlgReadGame();
+    if (!(dlgMeta().languages || []).includes(lang)) dlgMeta().languages = [...(dlgMeta().languages || []), lang].sort();
+    snapshotStructure('language');
+    await dlgRebuild(theirs.story, theirs.text);
+    await dlgSetBase(theirs);
+    const missing = theirs.story.dialogues.filter((d) => !String(theirs.text[d.id] || '').trim()).length;
+    toast(missing ? t('The book is in {lang} now. {n} lines wait for their words.', { lang, n: missing }) : t('The book is in {lang} now.', { lang }), 6000);
+  } catch (err) {
+    src.language = was;
+    toast(String(err.message || err), 8000);
+  } finally {
+    dlgBusy = false;
+    scheduleMetaSave();
+    dlgBar();
   }
 }
 
@@ -7969,7 +8160,7 @@ function dlgTree() {
     nodes.replaceChildren();
     const q = dlgTreeQuery.trim().toLowerCase();
     for (const ch of model.chapters) {
-      const lines = ch.lines.filter((l) => l.text.trim());
+      const lines = ch.lines.filter(DLG().isLine);
       const speaks = new Set(lines.map((l) => l.speaker));
       const shown = !dlgTreeSpeaker || speaks.has(dlgTreeSpeaker) || ch.characters.includes(dlgTreeSpeaker);
       const hit = q && (ch.id.includes(q) || lines.some((l) => l.text.toLowerCase().includes(q) || l.id.includes(q)));

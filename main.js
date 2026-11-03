@@ -2104,6 +2104,139 @@ ipcMain.handle('story:write', async (_e, repo, language, storyText, textText) =>
   }
 });
 
+// ---- dialogue books: Push, the Writer's git flow ----
+// So the writer never has to touch git: the story files are checked for
+// someone's half-done edit, the base branch (dev) is checked out and
+// pulled, the window merges the book onto that story, and then the files
+// go onto a branch story/<dialogue id>, are committed and pushed, the
+// branch is merged into dev, dev is pushed and the branch deleted, here and
+// on the remote. Every step is reported, and once a commit exists the words
+// are safe on its branch whatever fails after.
+const STORY_REF = /^[A-Za-z0-9._/-]+$/;
+let storyGitBusy = false;
+function storyGit(repo, args, steps) {
+  return new Promise((resolve) => {
+    require('child_process').execFile('git', ['-C', repo, ...args], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, // never wait on a password prompt nobody can see
+      timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true
+    }, (err, stdout, stderr) => {
+      const output = (String(stdout || '') + String(stderr || '')).trim();
+      const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
+      if (steps) steps.push({ command: 'git ' + args.map((a) => (/[\s"]/.test(a) ? JSON.stringify(a) : a)).join(' '), ok: code === 0, output: err && err.code === 'ENOENT' ? t('git isn’t installed on this computer.') : output });
+      resolve({ code, output: String(stdout || ''), err: output });
+    });
+  });
+}
+async function storyGitMust(repo, args, steps) {
+  const r = await storyGit(repo, args, steps);
+  if (r.code !== 0) throw new Error(`git ${args[0]}: ${r.err || 'failed'}`);
+  return r.output;
+}
+const storyPaths = (language) => ['data/story.json', `data/text/${language}.json`];
+function storyCheck(repo, language, base, remote) {
+  storyFolder(repo);
+  if (!STORY_LANG.test(language || '')) throw new Error('bad language');
+  if (!STORY_REF.test(base || '') || base.startsWith('-') || !STORY_REF.test(remote || '') || remote.startsWith('-')) throw new Error(t('That branch or remote name won’t do.'));
+}
+
+// What the story files look like before anything moves: the branch checked
+// out, whether git sees changes to them, what they say now, and what they
+// say in the last commit
+ipcMain.handle('story:git-look', async (_e, repo, language) => {
+  try {
+    storyCheck(repo, language, 'dev', 'origin');
+    const [story, text] = storyPaths(language);
+    const branch = (await storyGitMust(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const dirty = (await storyGitMust(repo, ['status', '--porcelain', '--', story, text])).trim();
+    const show = async (p) => { const r = await storyGit(repo, ['show', 'HEAD:' + p]); return r.code === 0 ? r.output : null; };
+    const data = path.join(repo, 'data');
+    return {
+      branch, dirty,
+      now: { story: await readIfThere(path.join(data, 'story.json')), text: await readIfThere(path.join(data, 'text', language + '.json')) },
+      head: { story: await show(story), text: await show(text) }
+    };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+// Back to the last commit's story files (only ever the book's own Save to
+// Game, which the book still holds), then the base branch, pulled
+ipcMain.handle('story:git-pull', async (_e, repo, language, base, remote, discard) => {
+  const steps = [];
+  if (storyGitBusy) return { error: t('A push is already running.'), steps };
+  storyGitBusy = true;
+  try {
+    storyCheck(repo, language, base, remote);
+    const [story, text] = storyPaths(language);
+    if (discard) {
+      await storyGit(repo, ['checkout', 'HEAD', '--', story], steps);
+      await storyGit(repo, ['checkout', 'HEAD', '--', text], steps);
+    }
+    await storyGitMust(repo, ['checkout', base], steps);
+    await storyGitMust(repo, ['pull', '--ff-only', remote, base], steps);
+    const data = path.join(repo, 'data');
+    return { steps, story: await readIfThere(path.join(data, 'story.json')), text: await readIfThere(path.join(data, 'text', language + '.json')) };
+  } catch (err) {
+    return { error: String(err.message || err), steps };
+  } finally {
+    storyGitBusy = false;
+  }
+});
+
+ipcMain.handle('story:git-push', async (_e, repo, language, base, remote, name, ids, storyText, textText) => {
+  const steps = [];
+  if (storyGitBusy) return { error: t('A push is already running.'), steps };
+  storyGitBusy = true;
+  let branch = null;
+  try {
+    storyCheck(repo, language, base, remote);
+    if (!/^[a-z0-9_]+$/.test(name || '')) throw new Error('bad branch name');
+    ids = (Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && /^[a-z0-9_]+$/.test(id));
+    if (typeof storyText !== 'string' || typeof textText !== 'string') throw new Error('nothing to write');
+    const [story, text] = storyPaths(language);
+    // story/<id>, or -2, -3… when that name is taken here or on the remote
+    for (let n = 1; ; n++) {
+      const candidate = 'story/' + name + (n === 1 ? '' : '-' + n);
+      const here = await storyGit(repo, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + candidate]);
+      const there = await storyGit(repo, ['ls-remote', '--heads', remote, candidate]);
+      if (here.code !== 0 && !there.output.trim()) { branch = candidate; break; }
+      if (n > 50) throw new Error('no free branch name');
+    }
+    await storyGitMust(repo, ['checkout', '-b', branch], steps);
+    const data = path.join(repo, 'data');
+    try {
+      fs.mkdirSync(path.join(data, 'text'), { recursive: true });
+      writeFileDurable(path.join(data, 'story.json'), storyText);
+      writeFileDurable(path.join(data, 'text', language + '.json'), textText);
+      await storyGitMust(repo, ['add', '--', story, text], steps);
+      await storyGitMust(repo, ['commit', '-m', `${branch}: Write dialogue ${ids.join(', ')}`, '--', story, text], steps);
+    } catch (err) {
+      // nothing was committed: no half-saved story is left behind (the book still has it all)
+      await storyGit(repo, ['checkout', 'HEAD', '--', story, text], steps);
+      await storyGit(repo, ['checkout', base], steps);
+      await storyGit(repo, ['branch', '-D', branch], steps);
+      throw err;
+    }
+    try {
+      await storyGitMust(repo, ['push', '-u', remote, branch], steps);
+      await storyGitMust(repo, ['checkout', base], steps);
+      await storyGitMust(repo, ['merge', '--no-ff', branch, '-m', `Merge ${branch} into ${base}`], steps);
+      await storyGitMust(repo, ['push', remote, base], steps);
+    } catch (err) {
+      return { error: t('{why}\n\nThe dialogue is safe: it is committed on the branch {branch}. Ask a developer to finish merging it into {base}.', { why: String(err.message || err), branch, base }), steps, branch, committed: true };
+    }
+    await storyGit(repo, ['branch', '-d', branch], steps);
+    await storyGit(repo, ['push', remote, '--delete', branch], steps);
+    return { ok: true, branch, steps };
+  } catch (err) {
+    logError('story push', err);
+    return { error: String(err.message || err), steps, branch };
+  } finally {
+    storyGitBusy = false;
+  }
+});
+
 ipcMain.handle('import:pick', async (_e, opts) => {
   const win = BrowserWindow.getFocusedWindow();
   const chapters = !!(opts && opts.chapters);

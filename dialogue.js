@@ -65,6 +65,12 @@
 
   const uniq = (list) => [...new Set((list || []).filter(Boolean))];
 
+  // A paragraph is a line when it has words, or when it's a line of the
+  // game's already (its id) that has no words in this language yet: an
+  // untranslated line stays in the story, listed as a problem, rather than
+  // dropping out of it. A blank paragraph with no id is nothing.
+  const isLine = (l) => !!String(l.text || '').trim() || !!(l.id && ID.test(l.id));
+
   // The chapters' lines with ids: the line's own, unless it's empty, badly
   // formed or already taken (a paragraph split in two carries its id into
   // both halves; the first keeps it). Returns the lines per chapter key
@@ -78,7 +84,7 @@
     for (const ch of model.chapters) {
       const out = [];
       ch.lines.forEach((l, index) => {
-        if (!String(l.text || '').trim()) return; // an empty paragraph is no line
+        if (!isLine(l)) return;
         let id = l.id && ID.test(l.id) && !seen.has(l.id) ? l.id : '';
         if (!id) {
           id = nextId(ch.id || 'line', used);
@@ -224,10 +230,11 @@
       else if (!ID.test(ch.id)) out.push({ key: ch.key, text: `${where}: the dialogue id "${ch.id}" must be lower case letters, digits and underscores.` });
       else if (dialogueIds.has(ch.id)) out.push({ key: ch.key, text: `${where} and ${nameOf(dialogueIds.get(ch.id))} share the dialogue id "${ch.id}".` });
       else dialogueIds.set(ch.id, ch.key);
-      const lines = ch.lines.filter((l) => String(l.text || '').trim());
+      const lines = ch.lines.filter(isLine);
       if (!lines.length) out.push({ key: ch.key, text: `${where} has no lines yet.` });
       lines.forEach((l, i) => {
         const n = i + 1;
+        if (!String(l.text || '').trim()) out.push({ key: ch.key, line: i, text: `${where}, line ${n} (${l.id}) has no words in this language.` });
         if (!l.speaker) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: nobody says it.` });
         else if (!can.has(l.speaker)) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: unknown character "${l.speaker}".` });
         else if (!(ch.characters || []).includes(l.speaker)) out.push({ key: ch.key, line: i, text: `${where}, line ${n}: ${l.speaker} isn't one of this dialogue's characters.` });
@@ -243,7 +250,7 @@
     const lineSeen = new Map();
     for (const ch of model.chapters) {
       for (const l of ch.lines) {
-        if (!l.id || !String(l.text || '').trim()) continue;
+        if (!l.id || !isLine(l)) continue;
         if (lineSeen.has(l.id) && lineSeen.get(l.id) !== ch.key) out.push({ key: ch.key, text: `${nameOf(ch.key)} and ${nameOf(lineSeen.get(l.id))} both have a line "${l.id}".` });
         else lineSeen.set(l.id, ch.key);
       }
@@ -461,7 +468,7 @@
     return { level, slot, edges, levels: byLevel.length, slots: Math.max(0, ...[...slot.values()].map((v) => v + 1)) };
   }
 
-  const api = { ID, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop, parseJsonc, readStory, gameSpeakers, storyToJson, textToJson, merge, treeLayout };
+  const api = { ID, isLine, slug, nextId, idAfter, baseOf, flatten, unflatten, problems, findLoop, parseJsonc, readStory, gameSpeakers, storyToJson, textToJson, merge, treeLayout };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.NeoDialogue = api;
 })(typeof window !== 'undefined' ? window : globalThis);

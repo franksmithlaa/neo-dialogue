@@ -269,6 +269,134 @@ test('the Outline is the story tree: a box per dialogue, arrows between them; a 
   assert.equal(await js(`document.getElementById('editor-view').classList.contains('dlg-tree-view')`), false);
 });
 
+// ---- Push: a game in git, with a remote and a dev branch ----
+const { execFileSync } = require('child_process');
+Object.assign(process.env, { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' });
+const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const remote = path.join(tmp, 'remote.git');
+const repo = path.join(tmp, 'game-git');
+const other = path.join(tmp, 'other-dev');
+const writeGame = (dir, st, tx) => {
+  fs.mkdirSync(path.join(dir, 'data', 'text'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'story.json'), D.storyToJson(st));
+  fs.writeFileSync(path.join(dir, 'data', 'text', 'en.json'), D.textToJson(st, tx));
+};
+const readGame = (dir, lang = 'en') => D.readStory(fs.readFileSync(path.join(dir, 'data', 'story.json'), 'utf8'), fs.readFileSync(path.join(dir, 'data', 'text', lang + '.json'), 'utf8'));
+const closeModal = () => js(`document.querySelectorAll('.modal-backdrop').forEach((m) => m.remove())`);
+const modalText = () => js(`[...document.querySelectorAll('.dlg-push')].map((m) => m.textContent).join(' | ')`);
+function setUpGit() {
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'dev', remote]);
+  execFileSync('git', ['clone', '-q', remote, repo], { stdio: 'ignore' });
+  git(repo, 'checkout', '-q', '-b', 'dev');
+  writeGame(repo, GAME_STORY, GAME_TEXT);
+  fs.writeFileSync(path.join(repo, 'data', 'quarters.json'), '{ "minions": [ { "id": "imp", "name": "Impy" } ] }\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'story');
+  git(repo, 'push', '-q', '-u', 'origin', 'dev');
+  execFileSync('git', ['clone', '-q', '-b', 'dev', remote, other], { stdio: 'ignore' });
+}
+
+test('Push: an edit goes into dev on the remote, through a story/ branch that is gone after', async () => {
+  setUpGit();
+  await js(`(async () => {
+    await backToShelf();
+    await createDialogueOnShelf(library.shelves[0]);
+    book.dialogue.source = { repo: ${JSON.stringify(repo)}, language: 'en' };
+    await dlgUpdateFromGame();
+  })()`);
+  await tick(600);
+  assert.match(await js('document.getElementById("tp-dialogue").textContent'), /Push to dev/);
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.textContent = 'Boss! Pushed.'; syncChapter(p.parentElement, book.chapterOrder[0]); })()`);
+  await js('dlgPush()');
+  await tick(400);
+  assert.match(await modalText(), /Pushed to dev as story\/imp_talk_01/);
+  await shot('dialogue-push');
+  await closeModal();
+  git(other, 'pull', '-q', 'origin', 'dev');
+  assert.equal(readGame(other).text.imp_talk_01, 'Boss! Pushed.');
+  assert.match(git(other, 'log', '--format=%s', '-2'), /^Merge story\/imp_talk_01 into dev\nstory\/imp_talk_01: Write dialogue imp_talk_01$/);
+  assert.equal(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD'), 'dev');
+  assert.equal(git(repo, 'branch', '--list', 'story/*'), '');
+  assert.equal(git(remote, 'branch', '--list', 'story/*'), '');
+});
+
+test('Push after Save to Game, while someone else pushed: both reach dev', async () => {
+  // someone else adds a line to dev
+  const s = readGame(other);
+  s.story.dialogues.push({ id: 'smith_02', character: 'smith', requires: { events: [], dialogues: [] }, next: [] });
+  s.text.smith_02 = 'Theirs.';
+  writeGame(other, s.story, s.text);
+  git(other, 'commit', '-q', '-am', 'their line');
+  git(other, 'push', '-q', 'origin', 'dev');
+  // the writer saves into the working tree first, then edits more and pushes
+  await js(`(() => { const p = document.querySelectorAll('.dialogue-body p')[1]; p.textContent = 'Imp! Saved.'; syncChapter(p.parentElement, book.chapterOrder[0]); })()`);
+  await js('dlgSaveToGame()');
+  await tick(400);
+  assert.notEqual(git(repo, 'status', '--porcelain'), '');
+  await js(`(() => { const p = document.querySelectorAll('.dialogue-body')[1].querySelector('p'); p.textContent = 'It locks! Pushed.'; syncChapter(p.parentElement, book.chapterOrder[1]); })()`);
+  await js('dlgPush()');
+  await tick(400);
+  assert.match(await modalText(), /Pushed to dev/);
+  await closeModal();
+  git(other, 'pull', '-q', 'origin', 'dev');
+  const r = readGame(other);
+  assert.equal(r.text.imp_talk_02, 'Imp! Saved.');
+  assert.equal(r.text.imp_chest_01, 'It locks! Pushed.');
+  assert.equal(r.text.smith_02, 'Theirs.');
+  assert.ok((await js('book.chapterOrder.map((k) => dlgChapter(k).id)')).includes('smith'));
+  assert.equal(git(repo, 'status', '--porcelain'), '');
+});
+
+test('Push stops at a developer\'s uncommitted edit to the story, and touches nothing', async () => {
+  const f = path.join(repo, 'data', 'text', 'en.json');
+  const edited = fs.readFileSync(f, 'utf8').replace('"Boss! Pushed."', '"A developer was here."');
+  fs.writeFileSync(f, edited);
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.textContent = 'Boss! Again.'; syncChapter(p.parentElement, book.chapterOrder[0]); })()`);
+  await js('dlgPush()');
+  await tick(300);
+  assert.match(await modalText(), /Not pushed.*changes that aren’t in git yet/);
+  await closeModal();
+  assert.equal(fs.readFileSync(f, 'utf8'), edited);
+  git(repo, 'checkout', '-q', '--', 'data');
+  await js(`(() => { const p = document.querySelector('.dialogue-body p'); p.textContent = 'Boss! Pushed.'; syncChapter(p.parentElement, book.chapterOrder[0]); })()`);
+});
+
+test('Nothing new: Push says so and makes no branch', async () => {
+  const head = git(remote, 'rev-parse', 'dev');
+  await js('dlgPush()');
+  await tick(300);
+  assert.match(await modalText(), /Nothing to push/);
+  await closeModal();
+  assert.equal(git(remote, 'rev-parse', 'dev'), head);
+});
+
+test('Another language: the same lines, empty until translated, saved into its own text file', async () => {
+  await js(`dlgSwitchLanguage('fr')`);
+  await tick(600);
+  assert.equal(await js('book.dialogue.source.language'), 'fr');
+  const ps = await js(`[...document.querySelectorAll('.dialogue-body')[0].children].map((p) => [p.getAttribute('data-line'), p.textContent])`);
+  assert.deepEqual(ps, [['imp_talk_01', ''], ['imp_talk_02', '']]);
+  assert.match((await js('dlgProblems()')).map((p) => p.text).join('\n'), /line 1 \(imp_talk_01\) has no words in this language/);
+  await js(`(() => {
+    for (const body of document.querySelectorAll('.dialogue-body')) {
+      for (const p of body.querySelectorAll('p')) p.textContent = 'FR ' + p.getAttribute('data-line');
+      syncChapter(body, body.closest('.chapter').dataset.id);
+    }
+  })()`);
+  await tick(500);
+  assert.deepEqual(await js('dlgProblems()'), []);
+  await js('dlgSaveToGame()');
+  await tick(400);
+  const fr = readGame(repo, 'fr');
+  assert.equal(fr.text.imp_talk_01, 'FR imp_talk_01');
+  assert.deepEqual(fr.story.dialogues.map((d) => d.id), readGame(repo).story.dialogues.map((d) => d.id));
+  assert.equal(readGame(repo).text.imp_talk_01, 'Boss! Pushed.', 'English is as it was');
+  // back to English: its words come back
+  await js(`dlgSwitchLanguage('en')`);
+  await tick(600);
+  assert.equal(await js(`document.querySelector('.dialogue-body p').textContent`), 'Boss! Pushed.');
+});
+
 async function main() {
   await app.whenReady();
   let failed = 0;

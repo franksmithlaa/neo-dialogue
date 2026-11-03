@@ -2475,3 +2475,9 @@ body.night .dlg-panel, body.night .dlg-label, body.night .chapter-body.dialogue-
 .dlg-node .who { fill: #8a857a; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; }
 .dlg-node .ev { fill: #5a78b0; font-size: 10.5px; }
 .dlg-empty { fill: #8a857a; font-size: 13px; }
+#tp-dialogue .dlg-lang { font: inherit; color: var(--ink); background: transparent; border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent); border-radius: 4px; padding: 2px 4px; }
+.dlg-push details { margin-top: 10px; font-size: 12px; }
+.dlg-push ol { margin: 6px 0 0 18px; max-height: 260px; overflow: auto; }
+.dlg-push li { margin-bottom: 4px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.dlg-push li.fail { color: var(--red); }
+.dlg-push li pre { white-space: pre-wrap; color: #8a857a; font-size: 11px; }
